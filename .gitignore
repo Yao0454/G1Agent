@@ -12,3 +12,6 @@ wheels/
 # Local editor/type-checker and tool caches
 typings/
 .ruff_cache/
+
+.codex/
+.agents/
