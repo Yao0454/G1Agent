@@ -1,0 +1,20 @@
+[project]
+name = "g1agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Yao0454", email = "yaoyifeng20070524@outlook.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pip>=26.2.1",
+    "ruff>=0.16.5",
+]
+
+[project.scripts]
+g1agent = "g1agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
