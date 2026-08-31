@@ -26,7 +26,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="connect to a physical G1 instead of the simulated adapter",
     )
-    parser.add_argument("--network", default="", help="Unitree DDS interface, e.g. eth0")
+    parser.add_argument(
+        "--network", default="", help="Unitree DDS interface, e.g. eth0"
+    )
     parser.add_argument("--domain-id", type=int, default=0)
     return parser.parse_args()
 
