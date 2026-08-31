@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Literal, Protocol, Self, cast
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -19,21 +19,43 @@ from pydantic import (
     model_validator,
 )
 
+from core.models import SkillArgs
+from core.skill import RobotSkill
 from perception.events import WorldEvent, WorldEventType
 
-DECISION_SYSTEM_PROMPT = """Select one Unitree G1 response for the supplied event.
+_DECISION_SYSTEM_PROMPT = """Select one Unitree G1 response for the supplied event.
 Output only a JSON object. Its top-level keys are action, skill, arguments,
 speech, and optionally reason. Never wrap the object in a decision key.
 
-Allowed responses:
-- person_entered: {"action":"execute_and_speak","skill":"wave",
-  "arguments":{"arm":"right"},"speech":"你好！"}
-- person_too_close: {"action":"execute_and_speak","skill":"move_backward",
-  "arguments":{"distance_m":0.2},"speech":"请稍微保持一点距离。"}
-- person_left or no behavior: {"action":"ignore","arguments":{}}
+For person_entered, greet only when the supplied world state says the person has
+not been greeted. For person_too_close, select a bounded safety response when
+one is available. For person_left or no behavior, ignore the event.
 
-Do not invent skills or arguments. Keep Chinese speech brief.
+Use only skills and argument shapes from the registry catalog below. Keep
+Chinese speech brief.
 """
+
+
+def build_decision_system_prompt(
+    skill_catalog: Sequence[RobotSkill[SkillArgs]],
+) -> str:
+    if not skill_catalog:
+        catalog = "- (no skills registered)"
+    else:
+        entries: list[str] = []
+        for skill in skill_catalog:
+            schema = skill.args_model.model_json_schema()
+            entries.append(
+                "- "
+                f"{skill.metadata.name}: {skill.metadata.description}; "
+                f"arguments schema: {json.dumps(schema, ensure_ascii=True, default=str)}"
+            )
+        catalog = "\n".join(entries)
+    return f"{_DECISION_SYSTEM_PROMPT}\nRegistered skill catalog:\n{catalog}\n"
+
+
+# Kept as a stable import for callers that do not need a dynamic catalog.
+DECISION_SYSTEM_PROMPT = build_decision_system_prompt(())
 
 DecisionAction = Literal[
     "execute_skill",
@@ -41,14 +63,11 @@ DecisionAction = Literal[
     "execute_and_speak",
     "ignore",
 ]
-DecisionSkill = Literal["wave", "move_backward"]
-
-
 class AgentDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: DecisionAction
-    skill: DecisionSkill | None = None
+    skill: str | None = None
     arguments: dict[str, object] = Field(default_factory=dict)
     speech: str | None = None
     reason: str | None = None
@@ -56,8 +75,9 @@ class AgentDecision(BaseModel):
     @field_validator("skill", "speech", "reason", mode="before")
     @classmethod
     def normalize_empty_optional_string(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
         return value
 
     @model_validator(mode="after")
@@ -101,8 +121,9 @@ class _StructuredDecisionModel(Protocol):
 class _StructuredDecisionInvoker:
     """Adapt one structured model call to the testable invoker contract."""
 
-    def __init__(self, model: _StructuredDecisionModel) -> None:
+    def __init__(self, model: _StructuredDecisionModel, system_prompt: str) -> None:
         self._model = model
+        self._system_prompt = system_prompt
 
     async def ainvoke(self, input_state: dict[str, object]) -> object:
         raw_messages = input_state.get("messages")
@@ -111,7 +132,7 @@ class _StructuredDecisionInvoker:
         ):
             raise TypeError("Decision Agent input must contain messages")
         result = await self._model.ainvoke(
-            [SystemMessage(content=DECISION_SYSTEM_PROMPT), *raw_messages]
+            [SystemMessage(content=self._system_prompt), *raw_messages]
         )
         return {"structured_response": result}
 
@@ -124,14 +145,21 @@ class EventDecisionAgent:
         base_url: str | None = None,
         invoker: DecisionInvoker | None = None,
         timeout_s: float = 8.0,
+        skill_catalog: Sequence[RobotSkill[SkillArgs]] | None = None,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("decision timeout must be greater than zero")
         self.timeout_s = timeout_s
+        self._skill_names = (
+            frozenset(skill.metadata.name for skill in skill_catalog)
+            if skill_catalog is not None
+            else None
+        )
         if invoker is not None:
             self._invoker = invoker
             return
 
+        system_prompt = build_decision_system_prompt(skill_catalog or ())
         model = ChatOllama(
             model=model_name or os.getenv("OLLAMA_MODEL", "qwen3:1.7b"),
             base_url=base_url or os.getenv("OLLAMA_HOST"),
@@ -147,7 +175,8 @@ class EventDecisionAgent:
             method="json_mode",
         )
         self._invoker = _StructuredDecisionInvoker(
-            cast(_StructuredDecisionModel, cast(object, structured_model))
+            cast(_StructuredDecisionModel, cast(object, structured_model)),
+            system_prompt,
         )
 
     async def decide(
@@ -185,8 +214,17 @@ class EventDecisionAgent:
         if not isinstance(output, Mapping):
             raise DecisionAgentError("Decision Agent returned an invalid state")
         try:
-            return AgentDecision.model_validate(output.get("structured_response"))
+            decision = AgentDecision.model_validate(output.get("structured_response"))
         except ValidationError as exc:
             raise DecisionAgentError(
                 f"Decision Agent returned an invalid decision: {exc}"
             ) from exc
+        if (
+            self._skill_names is not None
+            and decision.skill is not None
+            and decision.skill not in self._skill_names
+        ):
+            raise DecisionAgentError(
+                f"Decision Agent selected unregistered skill: {decision.skill}"
+            )
+        return decision

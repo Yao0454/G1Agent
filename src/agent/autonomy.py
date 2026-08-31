@@ -31,6 +31,12 @@ class DecisionOutcome:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _DecisionRequest:
+    event: WorldEvent
+    decision: AgentDecision
+
+
 class AutonomousDecisionLoop:
     def __init__(
         self,
@@ -40,13 +46,75 @@ class AutonomousDecisionLoop:
         world_state: WorldState | None = None,
         event_detector: EventDetector | None = None,
         speech: SpeechOutput | None = None,
+        queue_size: int = 32,
     ) -> None:
+        if queue_size <= 0:
+            raise ValueError("queue_size must be greater than zero")
         self.runtime = runtime
         self.decision_agent = decision_agent
         self.world_state = world_state or WorldState()
         self.event_detector = event_detector or EventDetector()
         self.speech = speech
         self._lock = asyncio.Lock()
+        self._event_queue: asyncio.Queue[WorldEvent] = asyncio.Queue(maxsize=queue_size)
+        self._decision_queue: asyncio.Queue[_DecisionRequest] = asyncio.Queue(
+            maxsize=queue_size
+        )
+        self._outcome_queue: asyncio.Queue[DecisionOutcome] = asyncio.Queue(
+            maxsize=queue_size
+        )
+        self._error_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_size)
+        self._worker_tasks: tuple[asyncio.Task[None], ...] = ()
+
+    @property
+    def running(self) -> bool:
+        return bool(self._worker_tasks)
+
+    async def start_workers(self) -> None:
+        if self.running:
+            return
+        self._worker_tasks = (
+            asyncio.create_task(self._decision_worker(), name="decision-worker"),
+            asyncio.create_task(self._execution_worker(), name="execution-worker"),
+        )
+
+    async def stop_workers(self) -> None:
+        tasks = self._worker_tasks
+        self._worker_tasks = ()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def observe(self, observation: PerceptionResult) -> tuple[WorldEvent, ...]:
+        """Update WorldState and enqueue sparse events without waiting for the Agent."""
+        async with self._lock:
+            events = self.event_detector.update(observation, self.world_state)
+        for event in events:
+            self._put_latest(self._event_queue, event)
+        return events
+
+    async def next_outcome(self, timeout: float | None = None) -> DecisionOutcome:
+        if timeout is None:
+            return await self._outcome_queue.get()
+        async with asyncio.timeout(timeout):
+            return await self._outcome_queue.get()
+
+    def drain_outcomes(self) -> tuple[DecisionOutcome, ...]:
+        outcomes: list[DecisionOutcome] = []
+        while True:
+            try:
+                outcomes.append(self._outcome_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return tuple(outcomes)
+
+    def drain_errors(self) -> tuple[str, ...]:
+        errors: list[str] = []
+        while True:
+            try:
+                errors.append(self._error_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return tuple(errors)
 
     async def process(
         self,
@@ -54,20 +122,76 @@ class AutonomousDecisionLoop:
     ) -> tuple[DecisionOutcome, ...]:
         async with self._lock:
             events = self.event_detector.update(observation, self.world_state)
-            outcomes: list[DecisionOutcome] = []
-            for event in events:
-                decision = await self.decision_agent.decide(
-                    event,
-                    self.world_state.to_dict(),
+        outcomes: list[DecisionOutcome] = []
+        for event in events:
+            async with self._lock:
+                world_state = self.world_state.to_dict()
+            decision = await self.decision_agent.decide(event, world_state)
+            outcomes.append(await self._execute(event, decision))
+        return tuple(outcomes)
+
+    async def _decision_worker(self) -> None:
+        while True:
+            event = await self._event_queue.get()
+            try:
+                async with self._lock:
+                    world_state = self.world_state.to_dict()
+                decision = await self.decision_agent.decide(event, world_state)
+                self._put_latest(
+                    self._decision_queue,
+                    _DecisionRequest(event=event, decision=decision),
                 )
-                outcomes.append(await self._execute(event, decision))
-            return tuple(outcomes)
+            except Exception as exc:  # noqa: BLE001 - worker must remain alive
+                self._put_latest(self._error_queue, str(exc))
+
+    async def _execution_worker(self) -> None:
+        while True:
+            item = await self._decision_queue.get()
+            try:
+                outcome = await self._execute(item.event, item.decision)
+                self._put_latest(self._outcome_queue, outcome)
+            except Exception as exc:  # noqa: BLE001 - worker must remain alive
+                self._put_latest(self._error_queue, str(exc))
+
+    @staticmethod
+    def _put_latest[T](queue: asyncio.Queue[T], item: T) -> None:
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            queue.put_nowait(item)
 
     async def _execute(
         self,
         event: WorldEvent,
         decision: AgentDecision,
     ) -> DecisionOutcome:
+        async with self._lock:
+            stale = (
+                event.type.value == "person_entered"
+                and (
+                    not self.world_state.person_visible
+                    or self.world_state.person_greeted
+                )
+            ) or (
+                event.type.value == "person_too_close"
+                and (
+                    not self.world_state.person_visible
+                    or not self.world_state.person_too_close
+                )
+            )
+        if stale:
+            return DecisionOutcome(
+                event=event,
+                decision=AgentDecision(
+                    action="ignore",
+                    reason="event is no longer current",
+                ),
+            )
+
         skill_result: SkillResult | None = None
         if decision.action in {"execute_skill", "execute_and_speak"}:
             if decision.skill is None:
@@ -76,12 +200,10 @@ class AutonomousDecisionLoop:
                 decision.skill,
                 **decision.arguments,
             )
-            if (
-                skill_result.success
-                and decision.skill == "wave"
-                and self.world_state.person_visible
-            ):
-                self.world_state.mark_greeted()
+            if skill_result.success and decision.skill == "wave":
+                async with self._lock:
+                    if self.world_state.person_visible:
+                        self.world_state.mark_greeted()
 
         speech_spoken = False
         if decision.action in {"speak", "execute_and_speak"}:

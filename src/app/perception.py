@@ -108,34 +108,56 @@ async def run_perception_loop(
     camera: RealSensePersonDetector,
     decision_loop: AutonomousDecisionLoop,
     once: bool = False,
+    once_wait_s: float = 8.0,
 ) -> int:
-    while True:
+    await decision_loop.start_workers()
+    try:
         observation = await asyncio.to_thread(camera.capture)
         _print_observation(observation)
-        try:
-            outcomes = await decision_loop.process(observation)
-        except DecisionAgentError as exc:
-            print(
-                json.dumps(
-                    {"type": "decision_error", "message": str(exc)},
-                    ensure_ascii=False,
-                ),
-                file=sys.stderr,
-                flush=True,
-            )
-            if once:
-                return 1
-            continue
-        for outcome in outcomes:
-            _print_outcome(outcome)
-        if once and any(
-            outcome.skill_result is not None
-            and not outcome.skill_result.success
-            for outcome in outcomes
-        ):
-            return 1
+        events = await decision_loop.observe(observation)
         if once:
+            if events:
+                try:
+                    failed = False
+                    async with asyncio.timeout(once_wait_s):
+                        for _ in events:
+                            outcome = await decision_loop.next_outcome()
+                            _print_outcome(outcome)
+                            failed = failed or (
+                                outcome.skill_result is not None
+                                and not outcome.skill_result.success
+                            )
+                    return int(failed)
+                except TimeoutError:
+                    for error in decision_loop.drain_errors():
+                        print(
+                            json.dumps(
+                                {"type": "decision_error", "message": error},
+                                ensure_ascii=False,
+                            ),
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    return 1
             return 0
+
+        while True:
+            for error in decision_loop.drain_errors():
+                print(
+                    json.dumps(
+                        {"type": "decision_error", "message": error},
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+            for outcome in decision_loop.drain_outcomes():
+                _print_outcome(outcome)
+            observation = await asyncio.to_thread(camera.capture)
+            _print_observation(observation)
+            await decision_loop.observe(observation)
+    finally:
+        await decision_loop.stop_workers()
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -160,6 +182,7 @@ async def _run(args: argparse.Namespace) -> int:
         model_name=args.model,
         base_url=args.ollama_url,
         timeout_s=args.decision_timeout_s,
+        skill_catalog=runtime.registry.list(),
     )
     camera = RealSensePersonDetector(
         serial=args.camera_serial,
@@ -200,6 +223,7 @@ async def _run(args: argparse.Namespace) -> int:
             camera=camera,
             decision_loop=decision_loop,
             once=args.once,
+            once_wait_s=args.decision_timeout_s + 1.0,
         )
     finally:
         try:

@@ -7,6 +7,7 @@ from .decision import (
     DecisionAgentError,
     DecisionInvoker,
     EventDecisionAgent,
+    build_decision_system_prompt,
 )
 from .service import AgentError, AgentInvoker, RobotAgent
 
@@ -21,4 +22,5 @@ __all__ = [
     "DecisionOutcome",
     "EventDecisionAgent",
     "RobotAgent",
+    "build_decision_system_prompt",
 ]

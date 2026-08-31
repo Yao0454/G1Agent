@@ -29,6 +29,10 @@ RealSense D435i USB -> person detection -> WorldState -> WorldEvent
     -> Decision Agent -> AgentDecision -> SkillRuntime -> G1 -> next frame
 ```
 
+持续运行时，相机采集、事件决策和动作执行由三个异步阶段组成：D435i 不会因为
+Ollama 推理、G1 动作或 TTS 播放而停止更新 WorldState；有界队列只传递稀疏事件，
+不会把每一帧送给模型。
+
 ## 目录
 
 ```text
@@ -76,12 +80,16 @@ ollama serve
 ollama pull <model-name>
 ```
 
-在机器人主机上还要安装本地 Unitree Python bindings：
+机器人主机已经有 Unitree Python bindings 时，直接从现有目录安装：
 
 ```bash
-git clone https://github.com/Yao0454/unitree_sdk2_bindings.git
-cd unitree_sdk2_bindings
-uv pip install -e .
+uv pip install -e ~/unitree_sdk2/unitree_sdk2_bindings
+```
+
+如果当前环境没有 `uv`，也可以使用机器人上运行项目的 Python：
+
+```bash
+python3 -m pip install -e ~/unitree_sdk2/unitree_sdk2_bindings
 ```
 
 代码直接使用 bindings 中的：
@@ -211,6 +219,9 @@ uv run --extra perception g1-perception --hardware --network eth0
 真机模式下，Decision Agent 的 `speech` 通过现有 Unitree `AudioClient` 播放；
 `--no-audio` 可以关闭。动作决策仍先经过 Pydantic `AgentDecision` 校验，然后只调用
 `SkillRuntime.execute()`，不会让模型直接访问 Unitree SDK。
+
+Decision Agent 的技能目录由当前 `SkillRegistry` 动态生成，新增 Skill 后不需要再
+维护另一份硬编码的技能白名单；每个动作的参数仍由对应 Skill 的 `SkillArgs` 校验。
 
 `wave` 使用 G1 `G1ArmActionClient` 的内置 `face wave`（动作 ID `25`）；如果当前
 bindings 没有该客户端，则回退到 `LocoClient.wave_hand()`。内置手臂动作只支持

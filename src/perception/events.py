@@ -70,16 +70,24 @@ class EventDetector:
         is_too_close = (
             distance_m is not None and distance_m <= self.too_close_distance_m
         )
+        events: list[WorldEvent] = []
+        if not was_visible:
+            events.append(
+                self._person_event(
+                    WorldEventType.PERSON_ENTERED,
+                    observation,
+                )
+            )
         if is_too_close:
             world_state.person_too_close = True
             if not was_too_close:
-                return (
+                events.append(
                     self._person_event(
                         WorldEventType.PERSON_TOO_CLOSE,
                         observation,
                     ),
                 )
-            return ()
+            return tuple(events)
 
         if (
             was_too_close
@@ -88,14 +96,7 @@ class EventDetector:
         ):
             world_state.person_too_close = False
 
-        if not was_visible:
-            return (
-                self._person_event(
-                    WorldEventType.PERSON_ENTERED,
-                    observation,
-                ),
-            )
-        return ()
+        return tuple(events)
 
     @staticmethod
     def _person_event(

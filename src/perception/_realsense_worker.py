@@ -32,9 +32,9 @@ def confidence(score):
 
 class Detector:
     def __init__(self, args):
-        import cv2
-        import numpy
-        import pyrealsense2 as rs
+        import cv2  # pyright: ignore[reportMissingImports]
+        import numpy  # pyright: ignore[reportMissingImports]
+        import pyrealsense2 as rs  # pyright: ignore[reportMissingImports]
 
         self.args = args
         self.cv2 = cv2

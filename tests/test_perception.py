@@ -76,6 +76,23 @@ class EventDetectorTests(unittest.TestCase):
         self.assertEqual(repeated, ())
         self.assertEqual([event.type for event in second], [WorldEventType.PERSON_TOO_CLOSE])
 
+    def test_entry_and_too_close_are_both_emitted_for_close_new_person(self) -> None:
+        state = WorldState()
+        detector = EventDetector()
+
+        events = detector.update(
+            observation(1.0, people=1, distance_m=0.6),
+            state,
+        )
+
+        self.assertEqual(
+            [event.type for event in events],
+            [
+                WorldEventType.PERSON_ENTERED,
+                WorldEventType.PERSON_TOO_CLOSE,
+            ],
+        )
+
     def test_out_of_order_observation_is_rejected(self) -> None:
         state = WorldState()
         detector = EventDetector()

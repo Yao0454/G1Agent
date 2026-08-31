@@ -34,8 +34,10 @@ class WaveSkill(RobotSkill[WaveArgs]):
             if fsm_id not in {500, 501, 801}:
                 return (
                     False,
-                    f"G1 FSM {fsm_id!r} does not support arm actions; "
-                    "enter a supported Sport mode first",
+                    (
+                        f"G1 FSM {fsm_id!r} does not support arm actions; "
+                        "enter a supported Sport mode first"
+                    ),
                 )
         return True, ""
 
