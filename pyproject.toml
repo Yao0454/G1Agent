@@ -19,7 +19,7 @@ dependencies = [
 perception = [
     "numpy",
     "opencv-python-headless",
-    "pyrealsense2",
+    "pyrealsense2; platform_machine != 'aarch64'",
 ]
 
 [project.scripts]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 from collections.abc import Mapping
@@ -28,6 +29,12 @@ class FakeDecisionInvoker:
     async def ainvoke(self, input_state: dict[str, object]) -> object:
         self.inputs.append(input_state)
         return {"structured_response": self.structured_response}
+
+
+class SlowDecisionInvoker:
+    async def ainvoke(self, input_state: dict[str, object]) -> object:
+        await asyncio.sleep(1.0)
+        return {"structured_response": {"action": "ignore"}}
 
 
 class ScriptedDecisionAgent:
@@ -80,6 +87,14 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError):
             AgentDecision(action="execute_skill")
 
+    def test_decision_normalizes_empty_optional_strings(self) -> None:
+        decision = AgentDecision.model_validate(
+            {"action": "ignore", "arguments": {}, "speech": "", "skill": ""}
+        )
+
+        self.assertIsNone(decision.speech)
+        self.assertIsNone(decision.skill)
+
     async def test_event_agent_returns_validated_structured_decision(self) -> None:
         invoker = FakeDecisionInvoker(
             {
@@ -119,6 +134,32 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(DecisionAgentError):
             await agent.decide(event, {})
+
+    async def test_event_agent_times_out_slow_invocation(self) -> None:
+        agent = EventDecisionAgent(
+            invoker=SlowDecisionInvoker(),
+            timeout_s=0.01,
+        )
+        event = WorldEvent(
+            type=WorldEventType.PERSON_ENTERED,
+            timestamp_s=1.0,
+        )
+
+        with self.assertRaisesRegex(DecisionAgentError, "timed out after 0.01"):
+            await agent.decide(event, {})
+
+    async def test_person_left_bypasses_model(self) -> None:
+        invoker = FakeDecisionInvoker({"action": "execute_skill", "skill": "wave"})
+        agent = EventDecisionAgent(invoker=invoker)
+        event = WorldEvent(
+            type=WorldEventType.PERSON_LEFT,
+            timestamp_s=1.0,
+        )
+
+        decision = await agent.decide(event, {})
+
+        self.assertEqual(decision.action, "ignore")
+        self.assertEqual(invoker.inputs, [])
 
 
 class AutonomousDecisionLoopTests(unittest.IsolatedAsyncioTestCase):

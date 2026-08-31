@@ -41,10 +41,19 @@ class G1LocoClientApi(Protocol):
     ) -> int: ...
 
 
+class G1ArmActionClientApi(Protocol):
+    def set_timeout(self, seconds: float) -> None: ...
+
+    def init(self) -> None: ...
+
+    def execute_action(self, action_id: int) -> int: ...
+
+
 @dataclass(frozen=True, slots=True)
 class UnitreeBindings:
     channel: ChannelApi
     create_loco_client: Callable[[], G1LocoClientApi]
+    create_arm_action_client: Callable[[], G1ArmActionClientApi] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,7 @@ class UnitreeG1Adapter:
         self.config = config or UnitreeG1Config()
         self._bindings = bindings
         self._loco: G1LocoClientApi | None = None
+        self._arm_action: G1ArmActionClientApi | None = None
         self._channel_ready = False
         self._lock = asyncio.Lock()
         self._native_lock = threading.Lock()
@@ -159,6 +169,11 @@ class UnitreeG1Adapter:
                 client = bindings.create_loco_client()
                 client.set_timeout(self.config.timeout_s)
                 client.init()
+                arm_action = None
+                if bindings.create_arm_action_client is not None:
+                    arm_action = bindings.create_arm_action_client()
+                    arm_action.set_timeout(self.config.timeout_s)
+                    arm_action.init()
             except Exception as exc:
                 if channel_ready:
                     try:
@@ -171,12 +186,14 @@ class UnitreeG1Adapter:
 
             self._bindings = bindings
             self._loco = client
+            self._arm_action = arm_action
             self._channel_ready = True
 
     def _close_sync(self) -> None:
         with self._native_lock:
             bindings = self._bindings
             self._loco = None
+            self._arm_action = None
             if not self._channel_ready or bindings is None:
                 return
             self._channel_ready = False
@@ -201,6 +218,13 @@ class UnitreeG1Adapter:
 
     def _wave_sync(self) -> None:
         with self._native_lock:
+            if self._arm_action is not None:
+                # The arm-action service is the supported G1 preset-action API.
+                # Action 25 is the built-in face wave; unlike the legacy loco
+                # task endpoint it reports unsupported FSM states explicitly.
+                status = self._arm_action.execute_action(25)
+                self._require_success("face wave", status)
+                return
             status = self._require_loco().wave_hand(False)
             self._require_success("wave_hand", status)
 
@@ -227,7 +251,19 @@ class UnitreeG1Adapter:
     @staticmethod
     def _require_success(operation: str, status: int) -> None:
         if status != 0:
-            raise RobotCommandError(f"{operation} failed with SDK status {status}")
+            detail = {
+                7400: "the rt/armsdk topic is occupied",
+                7401: "the arm is holding; release action 99 first",
+                7402: "invalid arm action id",
+                7404: (
+                    "arm actions require FSM 500, 501, or 801 "
+                    "(FSM 801 modes 0 or 3)"
+                ),
+            }.get(status)
+            suffix = f": {detail}" if detail else ""
+            raise RobotCommandError(
+                f"{operation} failed with SDK status {status}{suffix}"
+            )
 
     @staticmethod
     def _load_bindings() -> UnitreeBindings:
@@ -235,11 +271,21 @@ class UnitreeG1Adapter:
             channel_module = importlib.import_module("unitree_sdk2_cpp.channel")
             g1_module = importlib.import_module("unitree_sdk2_cpp.robot.g1")
             channel = cast(ChannelApi, cast(object, channel_module))
-            factory = cast(
+            loco_factory = cast(
                 Callable[[], G1LocoClientApi],
                 cast(object, getattr(g1_module, "LocoClient")),  # noqa: B009
             )
-            return UnitreeBindings(channel=channel, create_loco_client=factory)
+            arm_factory_object = getattr(g1_module, "G1ArmActionClient", None)
+            arm_factory = (
+                cast(Callable[[], G1ArmActionClientApi], arm_factory_object)
+                if callable(arm_factory_object)
+                else None
+            )
+            return UnitreeBindings(
+                channel=channel,
+                create_loco_client=loco_factory,
+                create_arm_action_client=arm_factory,
+            )
         except (ImportError, AttributeError) as exc:
             raise RobotCommandError(
                 "Unitree SDK2 Python bindings are unavailable; install "
