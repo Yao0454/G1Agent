@@ -155,6 +155,19 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, "ignore")
         self.assertIsNone(decision.speech)
 
+    def test_decision_upgrades_execute_skill_with_speech(self) -> None:
+        decision = AgentDecision.model_validate(
+            {
+                "action": "execute_skill",
+                "skill": "wave",
+                "arguments": {"arm": "right"},
+                "speech": "您好，欢迎来到我们的机器人！",
+            }
+        )
+
+        self.assertEqual(decision.action, "execute_and_speak")
+        self.assertEqual(decision.skill, "wave")
+
     async def test_event_agent_accepts_compact_skill_action(self) -> None:
         agent = EventDecisionAgent(
             invoker=FakeDecisionInvoker(

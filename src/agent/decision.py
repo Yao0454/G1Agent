@@ -28,6 +28,7 @@ Output only a JSON object. Its top-level keys are action, skill, arguments,
 speech, and optionally reason. Never wrap the object in a decision key.
 The action field must be exactly one of execute_skill, speak,
 execute_and_speak, or ignore. Put the robot skill name in skill, never in action.
+If both skill and speech are present, use execute_and_speak.
 
 For person_entered, greet only when the supplied world state says the person has
 not been greeted. For person_too_close, select a bounded safety response when
@@ -65,6 +66,12 @@ DecisionAction = Literal[
     "execute_and_speak",
     "ignore",
 ]
+
+
+def _has_nonempty_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 class AgentDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -86,25 +93,40 @@ class AgentDecision(BaseModel):
             return payload
         action = action.strip()
         payload["action"] = action
-        if action in {"execute_skill", "speak", "execute_and_speak", "ignore"}:
+        skill_value = payload.get("skill")
+        has_skill = _has_nonempty_text(skill_value)
+        has_arguments = bool(payload.get("arguments"))
+        has_speech = _has_nonempty_text(payload.get("speech"))
+
+        if action == "execute_skill":
+            if has_speech:
+                payload["action"] = "execute_and_speak"
+            return payload
+        if action == "speak":
+            if has_skill or has_arguments:
+                payload["action"] = "execute_and_speak" if has_speech else "execute_skill"
+            return payload
+        if action == "execute_and_speak":
+            if not has_speech:
+                payload["action"] = "execute_skill"
+            return payload
+        if action == "ignore":
+            if has_skill or has_arguments:
+                payload["action"] = "execute_and_speak" if has_speech else "execute_skill"
+            elif has_speech:
+                payload["action"] = "speak"
             return payload
 
-        if action in {"none", "no_action", "noop"}:
-            skill_value = payload.get("skill")
-            speech_value = payload.get("speech")
-            has_skill = isinstance(skill_value, str) and bool(skill_value.strip())
-            has_arguments = bool(payload.get("arguments"))
-            has_speech = isinstance(speech_value, str) and bool(speech_value.strip())
-            if not has_skill and not has_arguments:
-                payload["action"] = "speak" if has_speech else "ignore"
-                return payload
+        if action in {"none", "no_action", "noop"} and not has_skill and not has_arguments:
+            payload["action"] = "speak" if has_speech else "ignore"
+            return payload
 
         skill = payload.get("skill")
         if not isinstance(skill, str) or not skill.strip():
             payload["skill"] = action
         payload["action"] = (
             "execute_and_speak"
-            if payload.get("speech")
+            if has_speech
             else "execute_skill"
         )
         return payload
