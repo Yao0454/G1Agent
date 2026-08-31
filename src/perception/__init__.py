@@ -1,14 +1,16 @@
-"""Perception results and the first environment-triggered skill loop."""
+"""D435i observations, minimal world state, and sparse world events."""
 
-from .greeting import PersonGreetingLoop
+from .events import EventDetector, WorldEvent, WorldEventType
 from .models import PerceptionResult
 from .realsense import PerceptionError, RealSensePersonDetector
 from .world_state import WorldState
 
 __all__ = [
+    "EventDetector",
     "PerceptionError",
     "PerceptionResult",
-    "PersonGreetingLoop",
     "RealSensePersonDetector",
+    "WorldEvent",
+    "WorldEventType",
     "WorldState",
 ]

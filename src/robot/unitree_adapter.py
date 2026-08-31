@@ -32,6 +32,14 @@ class G1LocoClientApi(Protocol):
 
     def stop_move(self) -> int: ...
 
+    def move(
+        self,
+        vx: float,
+        vy: float,
+        vyaw: float,
+        continous_move: bool,
+    ) -> int: ...
+
 
 @dataclass(frozen=True, slots=True)
 class UnitreeBindings:
@@ -108,6 +116,22 @@ class UnitreeG1Adapter:
         async with self._lock:
             await self._run_native("wave_hand", self._wave_sync)
 
+    async def move_velocity(
+        self,
+        forward_m_s: float,
+        lateral_m_s: float,
+        yaw_rad_s: float,
+    ) -> None:
+        async with self._lock:
+            await self._run_native(
+                "move",
+                lambda: self._move_sync(
+                    forward_m_s,
+                    lateral_m_s,
+                    yaw_rad_s,
+                ),
+            )
+
     @staticmethod
     async def _run_native[ResultT](
         operation: str,
@@ -179,6 +203,21 @@ class UnitreeG1Adapter:
         with self._native_lock:
             status = self._require_loco().wave_hand(False)
             self._require_success("wave_hand", status)
+
+    def _move_sync(
+        self,
+        forward_m_s: float,
+        lateral_m_s: float,
+        yaw_rad_s: float,
+    ) -> None:
+        with self._native_lock:
+            status = self._require_loco().move(
+                forward_m_s,
+                lateral_m_s,
+                yaw_rad_s,
+                False,
+            )
+            self._require_success("move", status)
 
     def _require_loco(self) -> G1LocoClientApi:
         if self._loco is None or not self._channel_ready:

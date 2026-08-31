@@ -52,6 +52,14 @@ class FailingRobotAdapter:
     async def wave(self, arm: str) -> None:
         raise RobotCommandError("wave rejected")
 
+    async def move_velocity(
+        self,
+        forward_m_s: float,
+        lateral_m_s: float,
+        yaw_rad_s: float,
+    ) -> None:
+        raise RobotCommandError("move rejected")
+
 
 class AgentAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_accepts_text_and_returns_final_text(self) -> None:

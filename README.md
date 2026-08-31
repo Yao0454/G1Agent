@@ -1,7 +1,7 @@
 # G1 Agent
 
-一个以 Robot Skill Runtime 为执行边界的 Unitree G1 Agent。文本和麦克风是输入
-通道，不能直接分发机器人动作；只有 Agent 的 LangChain 工具可以调用 Skill。
+一个以 Robot Skill Runtime 为执行边界的 Unitree G1 Agent。文本、麦克风和视觉
+事件都不能直接分发机器人动作；所有动作最终只能通过 SkillRuntime 执行。
 
 ```text
 文本输入 ──────────────────────┐
@@ -21,21 +21,23 @@
                unitree_sdk2_cpp bindings
 ```
 
-Milestone 2 的第一条视觉路径不经过 LLM：
+Milestone 2 验证了不经过 LLM 的固定视觉触发链；当前 `test` 分支已经升级为
+Milestone 3 的事件决策链：
 
 ```text
-RealSense D435i USB -> person detection -> WorldState -> SkillRuntime -> G1
+RealSense D435i USB -> person detection -> WorldState -> WorldEvent
+    -> Decision Agent -> AgentDecision -> SkillRuntime -> G1 -> next frame
 ```
 
 ## 目录
 
 ```text
 src/
-├── agent/       # create_agent、Ollama 模型和会话
+├── agent/       # 对话 Agent、事件 Decision Agent 和决策执行闭环
 ├── app/         # 文本/麦克风 CLI 入口
 ├── adapters/    # LangChain tools、Whisper 输入、Unitree AudioClient
 ├── core/        # Skill Runtime 核心协议与执行器
-├── perception/  # D435i 取流、人员检测和最小去重状态
+├── perception/  # D435i 取流、人员检测、最小状态和事件检测
 ├── robot/       # RobotAdapter、G1 SDK 适配器、模拟适配器
 └── skills/      # 具体 Robot Skill
 ```
@@ -157,24 +159,52 @@ uv sync --extra perception
 部分 ARM64/Jetson 环境没有可用的 `pyrealsense2` wheel，需要按 Intel
 librealsense 文档在目标机安装或编译 Python bindings。
 
-先用模拟机器人验证相机、检测和状态去重：
+启动 Ollama 并准备 Decision Agent 使用的模型：
+
+```bash
+ollama serve
+ollama pull qwen2.5:3b
+```
+
+先用模拟机器人验证相机、事件、决策和状态去重：
 
 ```bash
 uv run --extra perception g1-perception --once
 uv run --extra perception g1-perception
 ```
 
-检测到人后，第二条命令只会对持续可见的人触发一次模拟 `wave`；该人离开
-`2` 秒后再次进入才会重新触发。连接真实 G1：
+默认闭环只处理三种稀疏事件：
+
+```text
+person_entered   -> Decision Agent -> wave / speech / ignore
+person_left      -> Decision Agent -> normally ignore
+person_too_close -> Decision Agent -> move_backward / speech / ignore
+```
+
+持续可见的同一个人不会重复产生 `person_entered`。默认距离小于等于 `0.8` 米时
+产生一次 `person_too_close`，恢复到 `1.0` 米后才允许再次触发，可以分别使用
+`--too-close-m` 和 `--too-close-release-m` 调整。
+
+连接真实 G1：
 
 ```bash
 uv run --extra perception g1-perception --hardware --network eth0
 ```
 
+真机模式下，Decision Agent 的 `speech` 通过现有 Unitree `AudioClient` 播放；
+`--no-audio` 可以关闭。动作决策仍先经过 Pydantic `AgentDecision` 校验，然后只调用
+`SkillRuntime.execute()`，不会让模型直接访问 Unitree SDK。
+
 多台 RealSense 同时连接时可增加 `--camera-serial <serial>`。默认读取
 `640x480@30 FPS` 的彩色和深度流，将深度对齐到彩色画面，并忽略有效深度超过
 `4` 米的检测。当前第一版使用 OpenCV HOG 全身检测器，适合验证闭环；实际场地
 仍需根据视角、光照和人员距离调整阈值并做真机验收。
+
+`move_backward` 将距离限制在 `0.05 <= distance_m <= 0.3` 米，并把速度限制在
+`0.1` 到 `0.3` 米/秒。它使用 SDK 的非连续一秒运动命令作为硬件侧超时兜底，并且
+只有 `stop_move()` 成功后才返回成功；异常、超时或取消仍会在 Skill 清理阶段再次
+请求停止。当前距离来自速度乘时间的开环估计，不是定位系统提供的精确位移；真机
+测试必须使用隔离场地并准备物理急停。
 
 ## 类型检查与测试
 

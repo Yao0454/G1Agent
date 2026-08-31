@@ -23,3 +23,10 @@ class RobotAdapter(Protocol):
         ...
 
     async def wave(self, arm: str) -> None: ...
+
+    async def move_velocity(
+        self,
+        forward_m_s: float,
+        lateral_m_s: float,
+        yaw_rad_s: float,
+    ) -> None: ...
