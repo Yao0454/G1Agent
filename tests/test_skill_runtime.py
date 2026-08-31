@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from core.context import SkillContext
 from core.models import SkillArgs, SkillMetadata, SkillResult
@@ -15,7 +16,7 @@ from robot.unitree_adapter import (
     UnitreeG1Adapter,
     UnitreeG1Config,
 )
-from skills.motions import WaveSkill
+from skills.motions import MoveBackwardSkill, WaveSkill
 
 
 class FakeRobotAdapter:
@@ -25,11 +26,14 @@ class FakeRobotAdapter:
         hardware: bool = False,
         connected: bool = False,
         wave_error: bool = False,
+        move_error: bool = False,
     ) -> None:
         self.hardware = hardware
         self.connected = connected
         self.wave_error = wave_error
+        self.move_error = move_error
         self.waves: list[str] = []
+        self.velocity_commands: list[tuple[float, float, float]] = []
         self.stop_count = 0
 
     async def get_state(self) -> RobotState:
@@ -42,6 +46,18 @@ class FakeRobotAdapter:
         if self.wave_error:
             raise RobotCommandError("wave command rejected")
         self.waves.append(arm)
+
+    async def move_velocity(
+        self,
+        forward_m_s: float,
+        lateral_m_s: float,
+        yaw_rad_s: float,
+    ) -> None:
+        self.velocity_commands.append(
+            (forward_m_s, lateral_m_s, yaw_rad_s)
+        )
+        if self.move_error:
+            raise RobotCommandError("move command rejected")
 
 
 class EmptyArgs(SkillArgs):
@@ -125,6 +141,45 @@ class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, SkillStatus.TIMEOUT)
         self.assertEqual(robot.stop_count, 0)
 
+    async def test_move_backward_is_bounded_and_always_stops(self) -> None:
+        robot = FakeRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(MoveBackwardSkill())
+
+        with patch(
+            "skills.motions.move_backward.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            result = await runtime.execute(
+                "move_backward",
+                distance_m=0.2,
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(robot.velocity_commands, [(-0.2, 0.0, 0.0)])
+        self.assertEqual(robot.stop_count, 1)
+
+    async def test_move_backward_stops_after_command_error(self) -> None:
+        robot = FakeRobotAdapter(move_error=True)
+        runtime = SkillRuntime(robot)
+        runtime.register(MoveBackwardSkill())
+
+        result = await runtime.execute("move_backward")
+
+        self.assertEqual(result.failure_code, FailureCode.ROBOT_ERROR)
+        self.assertEqual(robot.stop_count, 1)
+
+    async def test_move_backward_rejects_unsafe_distance(self) -> None:
+        robot = FakeRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(MoveBackwardSkill())
+
+        result = await runtime.execute("move_backward", distance_m=2.0)
+
+        self.assertEqual(result.failure_code, FailureCode.INVALID_ARGUMENTS)
+        self.assertEqual(robot.velocity_commands, [])
+        self.assertEqual(robot.stop_count, 0)
+
     def test_registry_rejects_duplicate_names(self) -> None:
         registry = SkillRegistry()
         registry.register(WaveSkill())
@@ -160,6 +215,8 @@ class FakeLocoClient:
         self.wave_flags: list[bool] = []
         self.stop_status = 0
         self.stop_count = 0
+        self.move_status = 0
+        self.move_calls: list[tuple[float, float, float, bool]] = []
 
     def set_timeout(self, seconds: float) -> None:
         self.timeout_s = seconds
@@ -179,6 +236,16 @@ class FakeLocoClient:
     def stop_move(self) -> int:
         self.stop_count += 1
         return self.stop_status
+
+    def move(
+        self,
+        vx: float,
+        vy: float,
+        vyaw: float,
+        continous_move: bool,
+    ) -> int:
+        self.move_calls.append((vx, vy, vyaw, continous_move))
+        return self.move_status
 
 
 class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -258,6 +325,19 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
         await adapter.stop()
         await adapter.close()
 
+        self.assertEqual(client.stop_count, 1)
+
+    async def test_move_velocity_uses_noncontinuous_sdk_failsafe(self) -> None:
+        channel = FakeChannel()
+        client = FakeLocoClient()
+        adapter = self.build_adapter(channel, client)
+        await adapter.connect()
+
+        await adapter.move_velocity(-0.2, 0.0, 0.0)
+        await adapter.stop()
+        await adapter.close()
+
+        self.assertEqual(client.move_calls, [(-0.2, 0.0, 0.0, False)])
         self.assertEqual(client.stop_count, 1)
 
     async def test_connect_and_close_are_idempotent(self) -> None:

@@ -4,120 +4,85 @@ import unittest
 from types import SimpleNamespace
 from typing import cast
 
-from core.runtime import SkillRuntime
-from core.types import FailureCode
 from perception import (
+    EventDetector,
     PerceptionError,
     PerceptionResult,
-    PersonGreetingLoop,
     RealSensePersonDetector,
+    WorldEventType,
     WorldState,
 )
 from perception.realsense import RealSenseBindings
-from robot import RobotCommandError, RobotState, SimulatedRobotAdapter
-from skills.motions import WaveSkill
 
 
-class FailingRobotAdapter:
-    def __init__(self) -> None:
-        self.wave_count = 0
-
-    async def get_state(self) -> RobotState:
-        return RobotState(hardware=False, connected=True)
-
-    async def stop(self) -> None:
-        pass
-
-    async def wave(self, arm: str) -> None:
-        self.wave_count += 1
-        raise RobotCommandError("wave rejected")
+def observation(
+    at_s: float,
+    *,
+    people: int,
+    distance_m: float | None = None,
+) -> PerceptionResult:
+    return PerceptionResult(
+        observed_at_s=at_s,
+        person_count=people,
+        nearest_person_distance_m=distance_m,
+    )
 
 
-def observation(at_s: float, *, people: int) -> PerceptionResult:
-    return PerceptionResult(observed_at_s=at_s, person_count=people)
+class EventDetectorTests(unittest.TestCase):
+    def test_person_entry_is_emitted_once_until_person_leaves(self) -> None:
+        state = WorldState(absence_reset_s=2.0)
+        detector = EventDetector()
 
+        entered = detector.update(
+            observation(1.0, people=1, distance_m=2.0),
+            state,
+        )
+        repeated = detector.update(
+            observation(1.1, people=1, distance_m=2.0),
+            state,
+        )
+        brief_miss = detector.update(observation(2.0, people=0), state)
+        left = detector.update(observation(3.1, people=0), state)
 
-class PersonGreetingLoopTests(unittest.IsolatedAsyncioTestCase):
-    async def test_visible_person_is_greeted_only_once(self) -> None:
-        robot = SimulatedRobotAdapter()
-        runtime = SkillRuntime(robot)
-        runtime.register(WaveSkill())
-        loop = PersonGreetingLoop(runtime)
+        self.assertEqual([event.type for event in entered], [WorldEventType.PERSON_ENTERED])
+        self.assertEqual(entered[0].data["distance_m"], 2.0)
+        self.assertEqual(repeated, ())
+        self.assertEqual(brief_miss, ())
+        self.assertEqual([event.type for event in left], [WorldEventType.PERSON_LEFT])
 
-        first = await loop.process(observation(1.0, people=1))
-        repeated = await loop.process(observation(1.1, people=1))
+    def test_too_close_event_uses_hysteresis(self) -> None:
+        state = WorldState()
+        detector = EventDetector(
+            too_close_distance_m=0.8,
+            too_close_release_m=1.0,
+        )
+        detector.update(observation(1.0, people=1, distance_m=2.0), state)
 
-        self.assertIsNotNone(first)
-        assert first is not None
-        self.assertTrue(first.success)
-        self.assertIsNone(repeated)
-        self.assertEqual(robot.events, [("wave", "right")])
-
-    async def test_brief_missed_detection_does_not_repeat_greeting(self) -> None:
-        robot = SimulatedRobotAdapter()
-        runtime = SkillRuntime(robot)
-        runtime.register(WaveSkill())
-        loop = PersonGreetingLoop(
-            runtime,
-            WorldState(absence_reset_s=2.0),
+        first = detector.update(
+            observation(2.0, people=1, distance_m=0.7),
+            state,
+        )
+        repeated = detector.update(
+            observation(2.1, people=1, distance_m=0.6),
+            state,
+        )
+        detector.update(observation(3.0, people=1, distance_m=1.1), state)
+        second = detector.update(
+            observation(4.0, people=1, distance_m=0.7),
+            state,
         )
 
-        await loop.process(observation(1.0, people=1))
-        await loop.process(observation(1.5, people=0))
-        result = await loop.process(observation(1.6, people=1))
+        self.assertEqual([event.type for event in first], [WorldEventType.PERSON_TOO_CLOSE])
+        self.assertEqual(repeated, ())
+        self.assertEqual([event.type for event in second], [WorldEventType.PERSON_TOO_CLOSE])
 
-        self.assertIsNone(result)
-        self.assertEqual(robot.events, [("wave", "right")])
-
-    async def test_person_reentry_after_absence_triggers_second_greeting(self) -> None:
-        robot = SimulatedRobotAdapter()
-        runtime = SkillRuntime(robot)
-        runtime.register(WaveSkill())
-        loop = PersonGreetingLoop(
-            runtime,
-            WorldState(absence_reset_s=2.0),
-        )
-
-        await loop.process(observation(1.0, people=1))
-        await loop.process(observation(3.0, people=0))
-        result = await loop.process(observation(3.1, people=1))
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        self.assertTrue(result.success)
-        self.assertEqual(
-            robot.events,
-            [("wave", "right"), ("wave", "right")],
-        )
-
-    async def test_failed_wave_is_retried_after_throttle_interval(self) -> None:
-        robot = FailingRobotAdapter()
-        runtime = SkillRuntime(robot)
-        runtime.register(WaveSkill())
-        loop = PersonGreetingLoop(
-            runtime,
-            WorldState(greeting_retry_s=5.0),
-        )
-
-        failed = await loop.process(observation(1.0, people=1))
-        throttled = await loop.process(observation(5.9, people=1))
-        retried = await loop.process(observation(6.0, people=1))
-
-        self.assertIsNotNone(failed)
-        assert failed is not None
-        self.assertEqual(failed.failure_code, FailureCode.ROBOT_ERROR)
-        self.assertIsNone(throttled)
-        self.assertIsNotNone(retried)
-        self.assertEqual(robot.wave_count, 2)
-
-    async def test_out_of_order_observation_is_rejected(self) -> None:
-        runtime = SkillRuntime(SimulatedRobotAdapter())
-        runtime.register(WaveSkill())
-        loop = PersonGreetingLoop(runtime)
-        await loop.process(observation(2.0, people=0))
+    def test_out_of_order_observation_is_rejected(self) -> None:
+        state = WorldState()
+        detector = EventDetector()
+        detector.update(observation(2.0, people=0), state)
 
         with self.assertRaisesRegex(ValueError, "time ordered"):
-            await loop.process(observation(1.0, people=0))
+            detector.update(observation(1.0, people=0), state)
 
 
 class FakeColorFrame:
