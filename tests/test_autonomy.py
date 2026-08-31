@@ -4,6 +4,7 @@ import asyncio
 import json
 import unittest
 from collections.abc import Mapping
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import HumanMessage
@@ -14,9 +15,12 @@ from agent import (
     AutonomousDecisionLoop,
     DecisionAgentError,
     EventDecisionAgent,
+    build_decision_system_prompt,
 )
+from core.models import SkillArgs
 from core.runtime import SkillRuntime
-from perception import PerceptionResult, WorldEvent, WorldEventType
+from core.skill import RobotSkill
+from perception import PerceptionResult, WorldEvent, WorldEventType, WorldState
 from robot import SimulatedRobotAdapter
 from skills.motions import MoveBackwardSkill, WaveSkill
 
@@ -66,6 +70,23 @@ class ScriptedDecisionAgent:
         return AgentDecision(action="ignore", reason="no action needed")
 
 
+class BlockingDecisionAgent(ScriptedDecisionAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def decide(
+        self,
+        event: WorldEvent,
+        world_state: Mapping[str, object],
+    ) -> AgentDecision:
+        self.calls.append((event, world_state))
+        self.started.set()
+        await self.release.wait()
+        return AgentDecision(action="ignore")
+
+
 class FakeSpeechOutput:
     def __init__(self) -> None:
         self.messages: list[str] = []
@@ -83,6 +104,16 @@ def observation(at_s: float, distance_m: float) -> PerceptionResult:
 
 
 class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
+    def test_decision_prompt_is_built_from_registry_catalog(self) -> None:
+        runtime = SkillRuntime(SimulatedRobotAdapter())
+        runtime.register(WaveSkill())
+        runtime.register(MoveBackwardSkill())
+
+        prompt = build_decision_system_prompt(runtime.registry.list())
+
+        self.assertIn("wave:", prompt)
+        self.assertIn("move_backward:", prompt)
+
     def test_decision_contract_rejects_missing_skill(self) -> None:
         with self.assertRaises(ValidationError):
             AgentDecision(action="execute_skill")
@@ -125,7 +156,11 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         agent = EventDecisionAgent(
             invoker=FakeDecisionInvoker(
                 {"action": "execute_skill", "skill": "unknown"}
-            )
+            ),
+            skill_catalog=cast(
+                tuple[RobotSkill[SkillArgs], ...],
+                (WaveSkill(),),
+            ),
         )
         event = WorldEvent(
             type=WorldEventType.PERSON_ENTERED,
@@ -229,3 +264,38 @@ class AutonomousDecisionLoopTests(unittest.IsolatedAsyncioTestCase):
             ["你好！", "请稍微保持一点距离。"],
         )
         self.assertEqual(len(agent.calls), 2)
+
+    async def test_workers_keep_observing_while_decision_is_blocked(self) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        agent = BlockingDecisionAgent()
+        loop = AutonomousDecisionLoop(
+            runtime,
+            agent,
+            world_state=WorldState(absence_reset_s=0.5),
+        )
+        await loop.start_workers()
+        try:
+            first_events = await loop.observe(observation(1.0, 2.0))
+            await asyncio.wait_for(agent.started.wait(), timeout=0.2)
+
+            second_events = await asyncio.wait_for(
+                loop.observe(
+                    PerceptionResult(
+                        observed_at_s=2.0,
+                        person_count=0,
+                    )
+                ),
+                timeout=0.2,
+            )
+
+            self.assertEqual(len(first_events), 1)
+            self.assertEqual(len(second_events), 1)
+            self.assertEqual(second_events[0].type, WorldEventType.PERSON_LEFT)
+            agent.release.set()
+            first_outcome = await loop.next_outcome(timeout=0.5)
+            second_outcome = await loop.next_outcome(timeout=0.5)
+            self.assertEqual(first_outcome.event.type, WorldEventType.PERSON_ENTERED)
+            self.assertEqual(second_outcome.event.type, WorldEventType.PERSON_LEFT)
+        finally:
+            await loop.stop_workers()

@@ -77,6 +77,27 @@ class SlowSkill(RobotSkill[EmptyArgs]):
         return SkillResult.ok()
 
 
+class ResourceSkill(RobotSkill[EmptyArgs]):
+    metadata = SkillMetadata(
+        name="resource_skill",
+        description="A skill used to verify resource locking.",
+        required_resources=("shared_resource",),
+        timeout_s=1.0,
+    )
+    args_model = EmptyArgs
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.execution_count = 0
+
+    async def execute(self, ctx: SkillContext, args: EmptyArgs) -> SkillResult:
+        self.execution_count += 1
+        self.started.set()
+        await self.release.wait()
+        return SkillResult.ok()
+
+
 class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_wave_runs_through_runtime(self) -> None:
         robot = FakeRobotAdapter()
@@ -179,6 +200,23 @@ class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.failure_code, FailureCode.INVALID_ARGUMENTS)
         self.assertEqual(robot.velocity_commands, [])
         self.assertEqual(robot.stop_count, 0)
+
+    async def test_required_resources_serialize_concurrent_invocations(self) -> None:
+        runtime = SkillRuntime(FakeRobotAdapter())
+        skill = ResourceSkill()
+        runtime.register(skill)
+
+        first = asyncio.create_task(runtime.execute("resource_skill"))
+        await asyncio.wait_for(skill.started.wait(), timeout=0.2)
+        second = asyncio.create_task(runtime.execute("resource_skill"))
+        await asyncio.sleep(0)
+        self.assertEqual(skill.execution_count, 1)
+
+        skill.release.set()
+        first_result, second_result = await asyncio.gather(first, second)
+        self.assertTrue(first_result.success)
+        self.assertTrue(second_result.success)
+        self.assertEqual(skill.execution_count, 2)
 
     def test_registry_rejects_duplicate_names(self) -> None:
         registry = SkillRegistry()
