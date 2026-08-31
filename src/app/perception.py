@@ -46,11 +46,21 @@ def parse_args() -> argparse.Namespace:
         help="Unitree DDS interface, e.g. eth0",
     )
     parser.add_argument("--domain-id", type=int, default=0)
-    parser.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "qwen2.5:3b"))
+    parser.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "qwen3:1.7b"))
     parser.add_argument("--ollama-url", default=os.getenv("OLLAMA_HOST"))
+    parser.add_argument(
+        "--decision-timeout-s",
+        type=float,
+        default=8.0,
+        help="maximum time to wait for one Ollama event decision",
+    )
     parser.add_argument("--no-audio", action="store_true")
     parser.add_argument("--speaker-id", type=int, default=0)
     parser.add_argument("--camera-serial", help="D435i serial number")
+    parser.add_argument(
+        "--camera-python",
+        help="Python with working pyrealsense2 bindings (default: /usr/bin/python3)",
+    )
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
@@ -102,7 +112,20 @@ async def run_perception_loop(
     while True:
         observation = await asyncio.to_thread(camera.capture)
         _print_observation(observation)
-        outcomes = await decision_loop.process(observation)
+        try:
+            outcomes = await decision_loop.process(observation)
+        except DecisionAgentError as exc:
+            print(
+                json.dumps(
+                    {"type": "decision_error", "message": str(exc)},
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            if once:
+                return 1
+            continue
         for outcome in outcomes:
             _print_outcome(outcome)
         if once and any(
@@ -136,6 +159,7 @@ async def _run(args: argparse.Namespace) -> int:
     decision_agent = EventDecisionAgent(
         model_name=args.model,
         base_url=args.ollama_url,
+        timeout_s=args.decision_timeout_s,
     )
     camera = RealSensePersonDetector(
         serial=args.camera_serial,
@@ -145,6 +169,7 @@ async def _run(args: argparse.Namespace) -> int:
         frame_timeout_ms=args.frame_timeout_ms,
         min_score=args.min_score,
         max_distance_m=args.max_distance_m,
+        bridge_python=args.camera_python,
     )
     world_state = WorldState(
         absence_reset_s=args.absence_reset_s,

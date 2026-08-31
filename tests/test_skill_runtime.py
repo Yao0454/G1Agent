@@ -248,6 +248,24 @@ class FakeLocoClient:
         return self.move_status
 
 
+class FakeArmActionClient:
+    def __init__(self) -> None:
+        self.timeout_s: float | None = None
+        self.init_count = 0
+        self.action_ids: list[int] = []
+        self.action_status = 0
+
+    def set_timeout(self, seconds: float) -> None:
+        self.timeout_s = seconds
+
+    def init(self) -> None:
+        self.init_count += 1
+
+    def execute_action(self, action_id: int) -> int:
+        self.action_ids.append(action_id)
+        return self.action_status
+
+
 class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
     def build_adapter(
         self,
@@ -288,6 +306,52 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.details, {"fsm_id": 500})
         self.assertFalse(adapter.connected)
 
+    async def test_wave_prefers_g1_arm_action_preset(self) -> None:
+        channel = FakeChannel()
+        loco = FakeLocoClient()
+        arm = FakeArmActionClient()
+        adapter = UnitreeG1Adapter(
+            UnitreeG1Config(network_interface="eth0"),
+            bindings=UnitreeBindings(
+                channel=channel,
+                create_loco_client=lambda: loco,
+                create_arm_action_client=lambda: arm,
+            ),
+        )
+        runtime = SkillRuntime(adapter)
+        runtime.register(WaveSkill())
+
+        await adapter.connect()
+        result = await runtime.execute("wave")
+        await adapter.close()
+
+        self.assertTrue(result.success)
+        self.assertEqual(arm.action_ids, [25])
+        self.assertEqual(loco.wave_flags, [])
+
+    async def test_arm_action_fsm_error_is_explained(self) -> None:
+        channel = FakeChannel()
+        loco = FakeLocoClient()
+        arm = FakeArmActionClient()
+        arm.action_status = 7404
+        adapter = UnitreeG1Adapter(
+            UnitreeG1Config(network_interface="eth0"),
+            bindings=UnitreeBindings(
+                channel=channel,
+                create_loco_client=lambda: loco,
+                create_arm_action_client=lambda: arm,
+            ),
+        )
+        runtime = SkillRuntime(adapter)
+        runtime.register(WaveSkill())
+
+        await adapter.connect()
+        result = await runtime.execute("wave")
+        await adapter.close()
+
+        self.assertFalse(result.success)
+        self.assertIn("FSM 500, 501, or 801", result.message)
+
     async def test_disconnected_adapter_fails_wave_precondition(self) -> None:
         channel = FakeChannel()
         client = FakeLocoClient()
@@ -298,6 +362,22 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
         result = await runtime.execute("wave")
 
         self.assertEqual(result.status, SkillStatus.PRECONDITION_FAILED)
+        self.assertEqual(client.wave_flags, [])
+
+    async def test_wave_rejects_unsupported_fsm(self) -> None:
+        channel = FakeChannel()
+        client = FakeLocoClient()
+        client.fsm_id = 1
+        adapter = self.build_adapter(channel, client)
+        runtime = SkillRuntime(adapter)
+        runtime.register(WaveSkill())
+
+        await adapter.connect()
+        result = await runtime.execute("wave")
+        await adapter.close()
+
+        self.assertFalse(result.success)
+        self.assertIn("does not support arm actions", result.message)
         self.assertEqual(client.wave_flags, [])
 
     async def test_nonzero_wave_status_becomes_robot_error(self) -> None:

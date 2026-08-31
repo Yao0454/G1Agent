@@ -189,7 +189,7 @@ dependencies = [
 perception = [
     { name = "numpy" },
     { name = "opencv-python-headless" },
-    { name = "pyrealsense2" },
+    { name = "pyrealsense2", marker = "platform_machine != 'aarch64'" },
 ]
 
 [package.metadata]
@@ -200,7 +200,7 @@ requires-dist = [
     { name = "opencv-python-headless", marker = "extra == 'perception'" },
     { name = "pip", specifier = ">=26.2.1" },
     { name = "pydantic", specifier = ">=2.13.5" },
-    { name = "pyrealsense2", marker = "extra == 'perception'" },
+    { name = "pyrealsense2", marker = "platform_machine != 'aarch64' and extra == 'perception'" },
     { name = "ruff", specifier = ">=0.16.5" },
 ]
 provides-extras = ["perception"]

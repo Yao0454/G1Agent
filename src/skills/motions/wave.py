@@ -29,6 +29,14 @@ class WaveSkill(RobotSkill[WaveArgs]):
         state = await ctx.robot.get_state()
         if state.hardware and not state.connected:
             return False, "robot is not connected"
+        if state.hardware:
+            fsm_id = state.details.get("fsm_id")
+            if fsm_id not in {500, 501, 801}:
+                return (
+                    False,
+                    f"G1 FSM {fsm_id!r} does not support arm actions; "
+                    "enter a supported Sport mode first",
+                )
         return True, ""
 
     async def execute(self, ctx: SkillContext, args: WaveArgs) -> SkillResult:

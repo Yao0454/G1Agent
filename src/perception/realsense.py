@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 
 from .models import PerceptionResult
+from .realsense_bridge import RealSenseBridge, RealSenseBridgeError
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ class RealSensePersonDetector:
         min_score: float = 0.5,
         max_distance_m: float | None = 4.0,
         bindings: RealSenseBindings | None = None,
+        bridge_python: str | None = None,
     ) -> None:
         if width <= 0 or height <= 0 or fps <= 0:
             raise ValueError("camera width, height, and fps must be positive")
@@ -133,6 +135,8 @@ class RealSensePersonDetector:
         self.min_score = min_score
         self.max_distance_m = max_distance_m
         self._bindings = bindings
+        self._bridge_python = bridge_python
+        self._bridge: RealSenseBridge | None = None
         self._pipeline: _RealSensePipeline | None = None
         self._align: _RealSenseAlign | None = None
         self._hog: _HogDescriptor | None = None
@@ -140,55 +144,102 @@ class RealSensePersonDetector:
 
     @property
     def opened(self) -> bool:
-        return self._pipeline is not None
+        return self._pipeline is not None or (
+            self._bridge is not None and self._bridge.opened
+        )
 
     def open(self) -> None:
         with self._lock:
             if self.opened:
                 return
-            bindings = self._bindings or self._load_bindings()
-            pipeline = bindings.realsense.pipeline()
-            config = bindings.realsense.config()
-            if self.serial:
-                config.enable_device(self.serial)
-            config.enable_stream(
-                bindings.realsense.stream.depth,
-                self.width,
-                self.height,
-                bindings.realsense.format.z16,
-                self.fps,
-            )
-            config.enable_stream(
-                bindings.realsense.stream.color,
-                self.width,
-                self.height,
-                bindings.realsense.format.bgr8,
-                self.fps,
-            )
-
-            try:
-                pipeline.start(config)
-                align = bindings.realsense.align(bindings.realsense.stream.color)
-                hog = bindings.opencv.HOGDescriptor()
-                hog.setSVMDetector(
-                    bindings.opencv.HOGDescriptor_getDefaultPeopleDetector()
-                )
-            except Exception as exc:
+            if self._bindings is None:
                 try:
-                    pipeline.stop()
-                except Exception:
-                    logger.exception(
-                        "failed to stop RealSense pipeline after open failure"
-                    )
-                raise PerceptionError(f"failed to open RealSense D435i: {exc}") from exc
+                    bindings = self._load_bindings()
+                except PerceptionError as native_error:
+                    self._open_bridge(native_error)
+                    return
+            else:
+                bindings = self._bindings
+            self._open_native(bindings)
 
-            self._bindings = bindings
-            self._pipeline = pipeline
-            self._align = align
-            self._hog = hog
+    def _open_native(self, bindings: RealSenseBindings) -> None:
+        pipeline = bindings.realsense.pipeline()
+        config = bindings.realsense.config()
+        if self.serial:
+            config.enable_device(self.serial)
+        config.enable_stream(
+            bindings.realsense.stream.depth,
+            self.width,
+            self.height,
+            bindings.realsense.format.z16,
+            self.fps,
+        )
+        config.enable_stream(
+            bindings.realsense.stream.color,
+            self.width,
+            self.height,
+            bindings.realsense.format.bgr8,
+            self.fps,
+        )
+
+        try:
+            pipeline.start(config)
+            align = bindings.realsense.align(bindings.realsense.stream.color)
+            hog = bindings.opencv.HOGDescriptor()
+            hog.setSVMDetector(
+                bindings.opencv.HOGDescriptor_getDefaultPeopleDetector()
+            )
+        except Exception as exc:
+            try:
+                pipeline.stop()
+            except Exception:
+                logger.exception(
+                    "failed to stop RealSense pipeline after open failure"
+                )
+            raise PerceptionError(f"failed to open RealSense D435i: {exc}") from exc
+
+        self._bindings = bindings
+        self._pipeline = pipeline
+        self._align = align
+        self._hog = hog
+
+    def _open_bridge(self, native_error: PerceptionError) -> None:
+        bridge = RealSenseBridge(
+            serial=self.serial,
+            width=self.width,
+            height=self.height,
+            fps=self.fps,
+            frame_timeout_ms=self.frame_timeout_ms,
+            min_score=self.min_score,
+            max_distance_m=self.max_distance_m,
+            python_executable=self._bridge_python,
+        )
+        try:
+            bridge.open()
+        except RealSenseBridgeError as bridge_error:
+            raise PerceptionError(
+                "D435i bindings failed in both the project and system Python. "
+                f"Project Python: {native_error}. System Python bridge: {bridge_error}"
+            ) from bridge_error
+        logger.warning(
+            "native RealSense bindings unavailable (%s); using %s bridge",
+            native_error,
+            bridge.python_executable,
+        )
+        self._bridge = bridge
 
     def close(self) -> None:
         with self._lock:
+            bridge = self._bridge
+            self._bridge = None
+            if bridge is not None:
+                try:
+                    bridge.close()
+                except RealSenseBridgeError as exc:
+                    raise PerceptionError(
+                        f"failed to stop RealSense D435i: {exc}"
+                    ) from exc
+                return
             pipeline = self._pipeline
             self._pipeline = None
             self._align = None
@@ -202,6 +253,12 @@ class RealSensePersonDetector:
 
     def capture(self) -> PerceptionResult:
         with self._lock:
+            bridge = self._bridge
+            if bridge is not None:
+                try:
+                    return bridge.capture()
+                except RealSenseBridgeError as exc:
+                    raise PerceptionError(f"D435i capture failed: {exc}") from exc
             pipeline = self._pipeline
             align = self._align
             hog = self._hog
@@ -292,8 +349,8 @@ class RealSensePersonDetector:
             opencv_module = importlib.import_module("cv2")
         except ImportError as exc:
             raise PerceptionError(
-                "D435i dependencies are unavailable; install pyrealsense2, numpy, "
-                "and opencv-python-headless on the camera host"
+                "native D435i dependencies are unavailable or ABI-incompatible: "
+                f"{exc}"
             ) from exc
         return RealSenseBindings(
             realsense=cast(_RealSenseApi, cast(object, realsense_module)),

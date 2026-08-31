@@ -88,6 +88,7 @@ uv pip install -e .
 
 - `unitree_sdk2_cpp.channel.initialize/release`
 - `unitree_sdk2_cpp.robot.g1.LocoClient`
+- `unitree_sdk2_cpp.robot.g1.G1ArmActionClient`
 - `unitree_sdk2_cpp.robot.g1.AudioClient`
 
 ## 文本入口
@@ -156,15 +157,31 @@ D435i 通过 USB 直接连接运行本程序的 Linux 主机。相机取流使�
 uv sync --extra perception
 ```
 
-部分 ARM64/Jetson 环境没有可用的 `pyrealsense2` wheel，需要按 Intel
-librealsense 文档在目标机安装或编译 Python bindings。
+JetPack 5 的系统 glibc 较旧，PyPI 的 ARM64 `pyrealsense2` wheel 可能无法加载。
+在 ARM64 上程序会先尝试当前 Python；如果 binding 不可用，会自动启动常驻的
+`/usr/bin/python3` 相机 worker，复用 JetPack 系统中安装的 librealsense、NumPy 和
+OpenCV，不会为每帧重启进程。先验证系统 Python 环境：
+
+```bash
+/usr/bin/python3 -c 'import pyrealsense2, numpy, cv2; print("RealSense ready")'
+```
+
+如果 binding 安装在其他解释器中，可传入 `--camera-python /path/to/python`，或设置
+`G1_REALSENSE_PYTHON`。不要为此升级 JetPack 5 的系统 glibc。
 
 启动 Ollama 并准备 Decision Agent 使用的模型：
 
 ```bash
 ollama serve
-ollama pull qwen2.5:3b
+ollama pull qwen3:1.7b
 ```
+
+视觉事件只进行一次轻量 Ollama JSON 决策，并关闭 Qwen3 的 thinking 模式。
+输出限制为 64 tokens，模型保持热加载；单次决策默认最多等待 8 秒，可使用
+`--decision-timeout-s` 调整。
+
+Jetson Orin NX 16G 推荐使用默认的 `qwen3:1.7b`。本机热模型的完整事件决策约
+`1.8` 秒；`qwen3:8b` 约 `4.9` 秒，更适合质量优先而非低延迟演示。
 
 先用模拟机器人验证相机、事件、决策和状态去重：
 
@@ -194,6 +211,11 @@ uv run --extra perception g1-perception --hardware --network eth0
 真机模式下，Decision Agent 的 `speech` 通过现有 Unitree `AudioClient` 播放；
 `--no-audio` 可以关闭。动作决策仍先经过 Pydantic `AgentDecision` 校验，然后只调用
 `SkillRuntime.execute()`，不会让模型直接访问 Unitree SDK。
+
+`wave` 使用 G1 `G1ArmActionClient` 的内置 `face wave`（动作 ID `25`）；如果当前
+bindings 没有该客户端，则回退到 `LocoClient.wave_hand()`。内置手臂动作只支持
+FSM `500`、`501`、`801`（FSM `801` 还要求 mode `0` 或 `3`）。SDK 返回 `0` 只表示
+命令被服务接受，不表示动作已经完成；程序会把非零状态转换成可读的失败原因。
 
 多台 RealSense 同时连接时可增加 `--camera-serial <serial>`。默认读取
 `640x480@30 FPS` 的彩色和深度流，将深度对齐到彩色画面，并忽略有效深度超过
