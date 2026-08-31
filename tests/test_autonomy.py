@@ -126,6 +126,57 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(decision.speech)
         self.assertIsNone(decision.skill)
 
+    def test_decision_normalizes_compact_skill_action(self) -> None:
+        decision = AgentDecision.model_validate(
+            {
+                "action": "wave",
+                "skill": "wave",
+                "arguments": {"arm": "right"},
+                "speech": "您好！",
+            }
+        )
+
+        self.assertEqual(decision.action, "execute_and_speak")
+        self.assertEqual(decision.skill, "wave")
+
+    def test_decision_infers_skill_from_compact_action(self) -> None:
+        decision = AgentDecision.model_validate(
+            {"action": "wave", "arguments": {"arm": "right"}}
+        )
+
+        self.assertEqual(decision.action, "execute_skill")
+        self.assertEqual(decision.skill, "wave")
+
+    def test_decision_normalizes_noop_alias(self) -> None:
+        decision = AgentDecision.model_validate(
+            {"action": "none", "arguments": {}, "speech": ""}
+        )
+
+        self.assertEqual(decision.action, "ignore")
+        self.assertIsNone(decision.speech)
+
+    async def test_event_agent_accepts_compact_skill_action(self) -> None:
+        agent = EventDecisionAgent(
+            invoker=FakeDecisionInvoker(
+                {
+                    "action": "wave",
+                    "skill": "wave",
+                    "arguments": {"arm": "right"},
+                    "speech": "您好！",
+                }
+            ),
+            skill_catalog=cast(
+                tuple[RobotSkill[SkillArgs], ...],
+                (WaveSkill(),),
+            ),
+        )
+        event = WorldEvent(type=WorldEventType.PERSON_ENTERED, timestamp_s=1.0)
+
+        decision = await agent.decide(event, {})
+
+        self.assertEqual(decision.action, "execute_and_speak")
+        self.assertEqual(decision.skill, "wave")
+
     async def test_event_agent_returns_validated_structured_decision(self) -> None:
         invoker = FakeDecisionInvoker(
             {

@@ -26,6 +26,8 @@ from perception.events import WorldEvent, WorldEventType
 _DECISION_SYSTEM_PROMPT = """Select one Unitree G1 response for the supplied event.
 Output only a JSON object. Its top-level keys are action, skill, arguments,
 speech, and optionally reason. Never wrap the object in a decision key.
+The action field must be exactly one of execute_skill, speak,
+execute_and_speak, or ignore. Put the robot skill name in skill, never in action.
 
 For person_entered, greet only when the supplied world state says the person has
 not been greeted. For person_too_close, select a bounded safety response when
@@ -71,6 +73,41 @@ class AgentDecision(BaseModel):
     arguments: dict[str, object] = Field(default_factory=dict)
     speech: str | None = None
     reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_skill_action_alias(cls, value: object) -> object:
+        """Accept the compact ``{action: skill, ...}`` shape some local models emit."""
+        if not isinstance(value, Mapping):
+            return value
+        payload = dict(value)
+        action = payload.get("action")
+        if not isinstance(action, str):
+            return payload
+        action = action.strip()
+        payload["action"] = action
+        if action in {"execute_skill", "speak", "execute_and_speak", "ignore"}:
+            return payload
+
+        if action in {"none", "no_action", "noop"}:
+            skill_value = payload.get("skill")
+            speech_value = payload.get("speech")
+            has_skill = isinstance(skill_value, str) and bool(skill_value.strip())
+            has_arguments = bool(payload.get("arguments"))
+            has_speech = isinstance(speech_value, str) and bool(speech_value.strip())
+            if not has_skill and not has_arguments:
+                payload["action"] = "speak" if has_speech else "ignore"
+                return payload
+
+        skill = payload.get("skill")
+        if not isinstance(skill, str) or not skill.strip():
+            payload["skill"] = action
+        payload["action"] = (
+            "execute_and_speak"
+            if payload.get("speech")
+            else "execute_skill"
+        )
+        return payload
 
     @field_validator("skill", "speech", "reason", mode="before")
     @classmethod
