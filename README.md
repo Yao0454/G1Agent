@@ -21,6 +21,12 @@
                unitree_sdk2_cpp bindings
 ```
 
+Milestone 2 的第一条视觉路径不经过 LLM：
+
+```text
+RealSense D435i USB -> person detection -> WorldState -> SkillRuntime -> G1
+```
+
 ## 目录
 
 ```text
@@ -29,6 +35,7 @@ src/
 ├── app/         # 文本/麦克风 CLI 入口
 ├── adapters/    # LangChain tools、Whisper 输入、Unitree AudioClient
 ├── core/        # Skill Runtime 核心协议与执行器
+├── perception/  # D435i 取流、人员检测和最小去重状态
 ├── robot/       # RobotAdapter、G1 SDK 适配器、模拟适配器
 └── skills/      # 具体 Robot Skill
 ```
@@ -135,6 +142,39 @@ Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播�
 
 `connect()` 不调用 `start()` 或运动命令，`close()` 只释放 DDS。`wave` 与显式
 `stop()` 都会改变实体机器人状态；真机运行前必须完成现场安全检查并准备物理急停。
+
+## D435i 视觉闭环
+
+D435i 通过 USB 直接连接运行本程序的 Linux 主机。相机取流使用
+`pyrealsense2`，不经过 Unitree SDK；Unitree bindings 仍只负责 G1 动作。
+
+安装可选视觉依赖：
+
+```bash
+uv sync --extra perception
+```
+
+部分 ARM64/Jetson 环境没有可用的 `pyrealsense2` wheel，需要按 Intel
+librealsense 文档在目标机安装或编译 Python bindings。
+
+先用模拟机器人验证相机、检测和状态去重：
+
+```bash
+uv run --extra perception g1-perception --once
+uv run --extra perception g1-perception
+```
+
+检测到人后，第二条命令只会对持续可见的人触发一次模拟 `wave`；该人离开
+`2` 秒后再次进入才会重新触发。连接真实 G1：
+
+```bash
+uv run --extra perception g1-perception --hardware --network eth0
+```
+
+多台 RealSense 同时连接时可增加 `--camera-serial <serial>`。默认读取
+`640x480@30 FPS` 的彩色和深度流，将深度对齐到彩色画面，并忽略有效深度超过
+`4` 米的检测。当前第一版使用 OpenCV HOG 全身检测器，适合验证闭环；实际场地
+仍需根据视角、光照和人员距离调整阈值并做真机验收。
 
 ## 类型检查与测试
 
