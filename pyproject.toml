@@ -15,8 +15,16 @@ dependencies = [
     "ruff>=0.16.5",
 ]
 
+[project.optional-dependencies]
+perception = [
+    "numpy",
+    "opencv-python-headless",
+    "pyrealsense2",
+]
+
 [project.scripts]
 g1agent = "app.main:main"
+g1-perception = "app.perception:main"
 g1-wave = "app.wave:main"
 
 [build-system]
@@ -24,4 +32,4 @@ requires = ["uv_build>=0.12.7,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = ["agent", "app", "core", "robot", "skills", "adapters"]
+module-name = ["agent", "app", "core", "robot", "skills", "adapters", "perception"]
