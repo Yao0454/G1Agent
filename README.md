@@ -9,6 +9,43 @@
                                             TTS       Unitree SDK2
 ```
 
+## Robot Skill Runtime V0.1
+
+新的 Skill Runtime 直接位于 `src/core`、`src/robot`、`src/skills` 和
+`src/adapters`，并使用
+`~/unitree_sdk2/unitree_sdk2_bindings` 暴露的 `channel` 与 G1 `LocoClient`，
+不依赖语音 Demo 的机器人分发代码。
+
+```python
+import asyncio
+
+from core.runtime import SkillRuntime
+from robot import UnitreeG1Adapter, UnitreeG1Config
+from skills.motions import WaveSkill
+
+
+async def main() -> None:
+    robot = UnitreeG1Adapter(
+        UnitreeG1Config(network_interface="eth0"),
+    )
+    runtime = SkillRuntime(robot)
+    runtime.register(WaveSkill())
+
+    await robot.connect()
+    try:
+        result = await runtime.execute("wave", arm="right", source="human")
+        print(result)
+    finally:
+        await robot.close()
+
+
+asyncio.run(main())
+```
+
+`connect()` 只初始化 DDS 和 `LocoClient`，不会调用 `start()` 或其他运动命令；
+`close()` 只释放 DDS。`wave` 和显式 `stop()` 都是会改变实体机器人状态的运动命令，
+执行前必须完成现场安全检查并准备物理急停。
+
 ## 快速开始：无硬件文本演示
 
 先准备本地 Ollama（默认模型是中文友好的 `qwen2.5:3b`）：
@@ -28,10 +65,10 @@ uv run g1agent
 
 ## 连接 G1
 
-在 Jetson/机器人环境中，确认 SDK2 Python binding 已安装（本机绑定源码位于 `~/unitree_sdk2_bindings`），然后显式打开真机模式：
+在 Jetson/机器人环境中，确认 SDK2 Python binding 已安装（本机绑定源码位于 `~/unitree_sdk2/unitree_sdk2_bindings`），然后显式打开真机模式：
 
 ```bash
-uv pip install -e ~/unitree_sdk2_bindings  # 如果当前环境尚未安装绑定
+uv pip install -e ~/unitree_sdk2/unitree_sdk2_bindings  # 如果当前环境尚未安装绑定
 uv run g1agent --hardware --network eth0
 ```
 

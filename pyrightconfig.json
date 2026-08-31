@@ -1,5 +1,5 @@
 {
-  "stubPath": "typings",
   "indexing": true,
-  "autoImportCompletions": true
+  "autoImportCompletions": true,
+  "typeCheckingMode": "standard",
 }
