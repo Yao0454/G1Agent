@@ -8,17 +8,20 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "langchain",
+    "langchain-ollama",
     "pip>=26.2.1",
     "pydantic>=2.13.5",
     "ruff>=0.16.5",
 ]
 
 [project.scripts]
-g1agent = "g1agent:main"
+g1agent = "app.main:main"
+g1-wave = "app.wave:main"
 
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = ["g1agent", "core", "robot", "skills", "adapters"]
+module-name = ["agent", "app", "core", "robot", "skills", "adapters"]

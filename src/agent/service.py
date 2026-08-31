@@ -1,0 +1,107 @@
+"""Conversational Agent that can invoke registered robot skills as tools."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping, Sequence
+from typing import Protocol, cast
+
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_ollama import ChatOllama
+
+from adapters.langchain import build_langchain_tools
+from core.runtime import SkillRuntime
+
+SYSTEM_PROMPT = """You are the conversational controller for a Unitree G1 robot.
+
+Reply in the user's language and keep spoken responses concise.
+Use a robot skill tool only when the user explicitly asks the robot to perform
+that capability. Never claim that a physical action succeeded before the tool
+returns success. If a tool fails or rejects its arguments, explain the failure
+briefly. Do not invent robot capabilities or emit action JSON.
+"""
+
+
+class AgentError(RuntimeError):
+    """Raised when the Agent fails to produce a usable final response."""
+
+
+class AgentInvoker(Protocol):
+    """Narrow boundary around the compiled LangChain graph."""
+
+    async def ainvoke(self, input_state: dict[str, object]) -> object: ...
+
+
+class RobotAgent:
+    def __init__(
+        self,
+        runtime: SkillRuntime,
+        *,
+        model_name: str | None = None,
+        base_url: str | None = None,
+        invoker: AgentInvoker | None = None,
+    ) -> None:
+        self._history: list[BaseMessage] = []
+        if invoker is not None:
+            self._invoker = invoker
+            return
+
+        model = ChatOllama(
+            model=model_name or os.getenv("OLLAMA_MODEL", "qwen2.5:3b"),
+            base_url=base_url or os.getenv("OLLAMA_HOST"),
+            temperature=0.2,
+            client_kwargs={"trust_env": False},
+        )
+        graph = create_agent(
+            model=model,
+            tools=build_langchain_tools(runtime),
+            system_prompt=SYSTEM_PROMPT,
+        )
+        self._invoker = cast(AgentInvoker, cast(object, graph))
+
+    async def chat(self, text: str) -> str:
+        text = text.strip()
+        if not text:
+            raise ValueError("agent input must not be empty")
+
+        input_messages = [*self._history, HumanMessage(content=text)]
+        input_state: dict[str, object] = {"messages": input_messages}
+        try:
+            output = await self._invoker.ainvoke(input_state)
+        except Exception as exc:
+            raise AgentError(f"Agent invocation failed: {exc}") from exc
+
+        messages = self._extract_messages(output)
+        reply = next(
+            (
+                str(message.text).strip()
+                for message in reversed(messages)
+                if isinstance(message, AIMessage) and str(message.text).strip()
+            ),
+            "",
+        )
+        if not reply:
+            raise AgentError("Agent did not return a final text response")
+
+        self._history = messages
+        return reply
+
+    def reset(self) -> None:
+        self._history.clear()
+
+    @staticmethod
+    def _extract_messages(output: object) -> list[BaseMessage]:
+        if not isinstance(output, Mapping):
+            raise AgentError("Agent returned an invalid state")
+        raw_messages = output.get("messages")
+        if not isinstance(raw_messages, Sequence) or isinstance(
+            raw_messages, (str, bytes)
+        ):
+            raise AgentError("Agent state does not contain messages")
+        messages = [
+            message for message in raw_messages if isinstance(message, BaseMessage)
+        ]
+        if not messages:
+            raise AgentError("Agent state contains no valid messages")
+        return messages

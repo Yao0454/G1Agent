@@ -2,7 +2,15 @@
 
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel, ConfigDict
+
 from .types import FailureCode, SkillStatus
+
+
+class SkillArgs(BaseModel):
+    """Base schema for every skill's validated arguments."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +66,20 @@ class SkillResult:
     recoverable: bool = False
 
     duration_s: float | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "success": self.success,
+            "status": self.status.value,
+            "message": self.message,
+            "data": self.data,
+            "verification": self.verification,
+            "recoverable": self.recoverable,
+            "duration_s": self.duration_s,
+        }
+        if self.failure_code is not None:
+            payload["failure_code"] = self.failure_code.value
+        return payload
 
     @classmethod
     def ok(

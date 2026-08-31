@@ -2,25 +2,24 @@
 
 from typing import cast
 
-from pydantic import BaseModel
-
+from .models import SkillArgs
 from .skill import RobotSkill
 
 
 class SkillRegistry:
     def __init__(self) -> None:
-        self._skills: dict[str, RobotSkill[BaseModel]] = {}
+        self._skills: dict[str, RobotSkill[SkillArgs]] = {}
 
-    def register[ArgsT: BaseModel](self, skill: RobotSkill[ArgsT]) -> None:
+    def register[ArgsT: SkillArgs](self, skill: RobotSkill[ArgsT]) -> None:
         name = skill.metadata.name
         if name in self._skills:
             raise ValueError(f"duplicate skill: {name}")
-        self._skills[name] = cast(RobotSkill[BaseModel], cast(object, skill))
+        self._skills[name] = cast(RobotSkill[SkillArgs], cast(object, skill))
 
     def unregister(self, name: str) -> None:
         self._skills.pop(name, None)
 
-    def get(self, name: str) -> RobotSkill[BaseModel]:
+    def get(self, name: str) -> RobotSkill[SkillArgs]:
         try:
             return self._skills[name]
         except KeyError as exc:
@@ -29,5 +28,5 @@ class SkillRegistry:
     def exists(self, name: str) -> bool:
         return name in self._skills
 
-    def list(self) -> tuple[RobotSkill[BaseModel], ...]:
+    def list(self) -> tuple[RobotSkill[SkillArgs], ...]:
         return tuple(self._skills.values())

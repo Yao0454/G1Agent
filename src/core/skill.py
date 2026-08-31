@@ -2,13 +2,11 @@
 
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel
-
 from .context import SkillContext
-from .models import SkillMetadata, SkillResult
+from .models import SkillArgs, SkillMetadata, SkillResult
 
 
-class RobotSkill[ArgsT: BaseModel](ABC):
+class RobotSkill[ArgsT: SkillArgs](ABC):
     metadata: SkillMetadata
     args_model: type[ArgsT]
 

@@ -1,7 +1,7 @@
 """Public API for the Robot Skill Runtime core."""
 
 from .context import SkillContext
-from .models import SkillInvocation, SkillMetadata, SkillResult
+from .models import SkillArgs, SkillInvocation, SkillMetadata, SkillResult
 from .registry import SkillRegistry
 from .runtime import SkillRuntime
 from .skill import RobotSkill
@@ -11,6 +11,7 @@ __all__ = [
     "ExecutionPhase",
     "FailureCode",
     "RobotSkill",
+    "SkillArgs",
     "SkillContext",
     "SkillInvocation",
     "SkillMetadata",

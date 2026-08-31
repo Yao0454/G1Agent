@@ -1,4 +1,4 @@
-"""Input adapters for text rehearsal and microphone + Whisper CLI ASR."""
+"""Microphone input through a system recorder and a local Whisper CLI."""
 
 from __future__ import annotations
 
@@ -13,13 +13,6 @@ class ASRError(RuntimeError):
 
 
 class MicrophoneASR:
-    """Record a short WAV clip and transcribe it with the local ``whisper`` CLI.
-
-    This deliberately keeps audio dependencies outside the Python package. On
-    a Jetson/Linux demo machine, installing ``alsa-utils`` and ``openai-whisper``
-    is enough; ``ffmpeg`` is accepted as a recorder fallback.
-    """
-
     def __init__(
         self,
         record_seconds: float = 5.0,
@@ -45,17 +38,15 @@ class MicrophoneASR:
     def transcribe_once(self) -> str:
         if not self.whisper_bin:
             raise ASRError(
-                "找不到 whisper 命令。请安装 openai-whisper，或使用 --input text 演示。"
+                "找不到 whisper 命令，请安装 Whisper 或改用 --input text。"
             )
         if self._uses_cpp() and not self.model:
-            raise ASRError(
-                "whisper.cpp 需要 --whisper-model 指向 ggml 模型文件，例如 ggml-base.bin。"
-            )
+            raise ASRError("whisper.cpp 需要 --whisper-model 指向 ggml 模型文件。")
         recorder = shutil.which("arecord") or shutil.which("ffmpeg")
         if not recorder:
             raise ASRError("找不到 arecord 或 ffmpeg，无法录音。")
 
-        with tempfile.TemporaryDirectory(prefix="g1agent-asr-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="g1-asr-") as temp_dir:
             wav_path = Path(temp_dir) / "input.wav"
             self._record(recorder, wav_path)
             return self._transcribe(wav_path, Path(temp_dir)).strip()
@@ -87,7 +78,7 @@ class MicrophoneASR:
                 "-f",
                 "alsa",
                 "-i",
-                "default",
+                self.audio_device or "default",
                 "-t",
                 str(self.record_seconds),
                 str(wav_path),
@@ -133,9 +124,7 @@ class MicrophoneASR:
 
     def _transcribe_cpp(self, wav_path: Path, output_dir: Path) -> str:
         if not self.model:
-            raise ASRError(
-                "whisper.cpp 需要 --whisper-model 指向 ggml 模型文件，例如 ggml-base.bin。"
-            )
+            raise ASRError("whisper.cpp 需要 --whisper-model 指向 ggml 模型文件。")
         output_base = output_dir / "transcript"
         command = [
             self.whisper_bin or "whisper-cli",

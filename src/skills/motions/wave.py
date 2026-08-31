@@ -2,16 +2,12 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
-
 from core.context import SkillContext
-from core.models import SkillMetadata, SkillResult
+from core.models import SkillArgs, SkillMetadata, SkillResult
 from core.skill import RobotSkill
 
 
-class WaveArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class WaveArgs(SkillArgs):
     arm: Literal["right"] = "right"
 
 

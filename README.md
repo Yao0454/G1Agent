@@ -1,101 +1,150 @@
-# G1 voice demo
+# G1 Agent
 
-一个尽量短的语言驱动具身机器人 Demo：
+一个以 Robot Skill Runtime 为执行边界的 Unitree G1 Agent。文本和麦克风是输入
+通道，不能直接分发机器人动作；只有 Agent 的 LangChain 工具可以调用 Skill。
 
 ```text
-输入（文本或麦克风） -> Whisper ASR -> Ollama -> {speech, action}
-                                             |             |
-                                             v             v
-                                            TTS       Unitree SDK2
+文本输入 ──────────────────────┐
+                              v
+麦克风 -> Whisper ASR -> LangChain Agent -> 最终回复 -> AudioClient TTS
+                              |
+                              v
+                       LangChain tools
+                              |
+                              v
+                         SkillRuntime
+                              |
+                         RobotSkill
+                              |
+                    UnitreeG1Adapter
+                              |
+               unitree_sdk2_cpp bindings
 ```
 
-## Robot Skill Runtime V0.1
+## 目录
 
-新的 Skill Runtime 直接位于 `src/core`、`src/robot`、`src/skills` 和
-`src/adapters`，并使用
-`~/unitree_sdk2/unitree_sdk2_bindings` 暴露的 `channel` 与 G1 `LocoClient`，
-不依赖语音 Demo 的机器人分发代码。
-
-```python
-import asyncio
-
-from core.runtime import SkillRuntime
-from robot import UnitreeG1Adapter, UnitreeG1Config
-from skills.motions import WaveSkill
-
-
-async def main() -> None:
-    robot = UnitreeG1Adapter(
-        UnitreeG1Config(network_interface="eth0"),
-    )
-    runtime = SkillRuntime(robot)
-    runtime.register(WaveSkill())
-
-    await robot.connect()
-    try:
-        result = await runtime.execute("wave", arm="right", source="human")
-        print(result)
-    finally:
-        await robot.close()
-
-
-asyncio.run(main())
+```text
+src/
+├── agent/       # create_agent、Ollama 模型和会话
+├── app/         # 文本/麦克风 CLI 入口
+├── adapters/    # LangChain tools、Whisper 输入、Unitree AudioClient
+├── core/        # Skill Runtime 核心协议与执行器
+├── robot/       # RobotAdapter、G1 SDK 适配器、模拟适配器
+└── skills/      # 具体 Robot Skill
 ```
 
-`connect()` 只初始化 DDS 和 `LocoClient`，不会调用 `start()` 或其他运动命令；
-`close()` 只释放 DDS。`wave` 和显式 `stop()` 都是会改变实体机器人状态的运动命令，
-执行前必须完成现场安全检查并准备物理急停。
+## Wave 闭环验收
 
-## 快速开始：无硬件文本演示
-
-先准备本地 Ollama（默认模型是中文友好的 `qwen2.5:3b`）：
+先完全绕过 Agent 和 Ollama，直接验证唯一 Runtime 入口：
 
 ```bash
+uv run g1-wave
+```
+
+默认使用模拟适配器，输出至少包含：
+
+```json
+{"success": true, "status": "succeeded"}
+```
+
+在机器人主机上直接跑真实 G1：
+
+```bash
+uv run g1-wave --hardware --network eth0
+```
+
+这个命令的完整路径是
+`SkillRuntime -> SkillExecutor -> SkillRegistry -> WaveSkill -> UnitreeG1Adapter -> bindings`，
+不导入 Agent，也不调用 LLM。`--hardware` 会直接连接真机，没有二次交互确认。
+
+## 安装
+
+安装项目依赖并准备 Ollama：
+
+```bash
+uv sync
 ollama serve
-ollama pull qwen2.5:3b
+ollama pull <model-name>
 ```
 
-在本仓库的 Python 环境中运行：
+在机器人主机上还要安装本地 Unitree Python bindings：
 
 ```bash
-uv run g1agent
+git clone https://github.com/Yao0454/unitree_sdk2_bindings.git
+cd unitree_sdk2_bindings
+uv pip install -e .
 ```
 
-输入例如 `给大家打个招呼`、`点头表示同意` 或 `跳一段舞`。没有运行 Ollama 时程序会打印提示并使用关键词回退，动作以 `[robot dry-run]` 显示，不会控制真机。
+代码直接使用 bindings 中的：
 
-## 连接 G1
+- `unitree_sdk2_cpp.channel.initialize/release`
+- `unitree_sdk2_cpp.robot.g1.LocoClient`
+- `unitree_sdk2_cpp.robot.g1.AudioClient`
 
-在 Jetson/机器人环境中，确认 SDK2 Python binding 已安装（本机绑定源码位于 `~/unitree_sdk2/unitree_sdk2_bindings`），然后显式打开真机模式：
+## 文本入口
+
+无硬件时使用模拟 `RobotAdapter`，便于验证 Agent 和工具调用：
 
 ```bash
-uv pip install -e ~/unitree_sdk2/unitree_sdk2_bindings  # 如果当前环境尚未安装绑定
-uv run g1agent --hardware --network eth0
+uv run g1agent --input text
 ```
 
-程序会先要求输入 `G1` 确认。支持的动作固定为：`wave`、`shake_hand`、`nod`、`shake_head`、`stand`、`sit`、`move_forward`、`turn_left`、`turn_right`、`dance`、`stop`。LLM 无法生成列表外的动作，也不会接收电机或关节参数。
+文本会先送入 LangChain `create_agent`。例如用户要求挥手时，Agent 调用 `wave`
+工具，工具只调用 `SkillRuntime.execute()`，不会生成或解析 action 字符串。
+模拟模式只打印 Agent 回复，不调用任何本机系统 TTS。
 
-`move_forward` 和左右转使用 SDK 的限时速度接口（约 0.7 秒）；`shake_hand` 使用 SDK 原生握手动作，`nod`、`shake_head`、`dance` 通过 G1 上配置的自定义动作名调用 `G1ArmActionClient`，如果机器人没有对应动作，程序会显示 SDK 错误而不会生成新的底层控制。
+## 麦克风入口
 
-## 麦克风模式
-
-麦克风模式使用系统工具，不把音频依赖塞进 Demo 核心。Jetson 上建议使用带 CUDA 的 `whisper.cpp`，避免为 Python/Torch 安装一套很重的 ARM 依赖：
+麦克风输入通过 `arecord` 或 `ffmpeg` 录音，再交给本地 Whisper CLI：
 
 ```bash
 sudo apt install alsa-utils ffmpeg
+
 uv run g1agent --input microphone \
   --whisper-bin whisper-cli \
   --whisper-model /opt/models/ggml-base.bin \
-  --language zh --record-seconds 5
+  --language zh \
+  --record-seconds 5
 ```
 
-`whisper-cli`/`whisper-cpp` 使用 whisper.cpp 参数；如果已有 Python `whisper` 命令也可以直接使用。USB 麦克风不是默认设备时，加 `--audio-device hw:2,0`。没有麦克风或 ASR 时，使用默认文本模式仍可完整演示 Ollama、TTS 并发和动作 dispatch。
+USB 麦克风不是默认设备时增加 `--audio-device hw:2,0`。ASR 的输出只是普通
+用户文本，后续路径与文本入口完全一致。
 
-## TTS
-
-程序自动探测 `espeak-ng`、`espeak` 或 macOS `say`。找不到时只打印回复文本：
+## 连接真机
 
 ```bash
-sudo apt install espeak-ng
+uv run g1agent \
+  --hardware \
+  --network eth0 \
+  --input microphone \
+  --whisper-bin whisper-cli \
+  --whisper-model /opt/models/ggml-base.bin \
+  --language zh
 ```
 
-中文语音可按本机安装的 voice 名称指定，例如：`uv run g1agent --tts-voice cmn`。语音播放和动作执行通过 `asyncio.gather` 并发，便于现场展示机器人边说边动。
+指定 `--hardware` 后程序会直接连接机器人。连接顺序为：
+
+```text
+初始化 DDS -> LocoClient.init() -> AudioClient.init() -> Agent 循环
+```
+
+Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播放。默认
+`speaker_id` 为 `0`，可以用 `--speaker-id` 修改；`--no-audio` 可以禁用语音输出。
+`AudioClient` 复用 `UnitreeG1Adapter` 已初始化的 DDS channel，不会重复初始化或
+释放全局 channel。
+
+`connect()` 不调用 `start()` 或运动命令，`close()` 只释放 DDS。`wave` 与显式
+`stop()` 都会改变实体机器人状态；真机运行前必须完成现场安全检查并准备物理急停。
+
+## 类型检查与测试
+
+仓库根目录的 `pyrightconfig.json` 把本目录设为 `standard` 等级，并指向项目
+`.venv`，避免编辑器使用错误解释器造成第三方类型缺失或 `create_agent` 的严格
+Unknown 诊断。
+
+```bash
+uv run python -m unittest discover -s tests -v
+uv run ruff check src tests
+pyright src tests
+uv build
+```

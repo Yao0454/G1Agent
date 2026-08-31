@@ -3,10 +3,8 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from pydantic import BaseModel
-
 from core.context import SkillContext
-from core.models import SkillMetadata, SkillResult
+from core.models import SkillArgs, SkillMetadata, SkillResult
 from core.registry import SkillRegistry
 from core.runtime import SkillRuntime
 from core.skill import RobotSkill
@@ -46,7 +44,7 @@ class FakeRobotAdapter:
         self.waves.append(arm)
 
 
-class EmptyArgs(BaseModel):
+class EmptyArgs(SkillArgs):
     pass
 
 
@@ -69,7 +67,7 @@ class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = SkillRuntime(robot)
         runtime.register(WaveSkill())
 
-        result = await runtime.execute("wave", arm="right", source="test")
+        result = await runtime.execute("wave", arm="right")
 
         self.assertTrue(result.success)
         self.assertEqual(result.status, SkillStatus.SUCCEEDED)
