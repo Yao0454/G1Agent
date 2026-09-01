@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import threading
+import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from .base import RobotCommandError, RobotState
+from .base import ActionVerification, RobotCommandError, RobotState
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +52,43 @@ class G1ArmActionClientApi(Protocol):
     def execute_action(self, action_id: int) -> int: ...
 
 
+class ArmActionMonitorApi(Protocol):
+    def init_channel(self) -> None: ...
+
+    def close_channel(self) -> None: ...
+
+
+class _StringMessageApi(Protocol):
+    @property
+    def data(self) -> str: ...
+
+
+class _ChannelSubscriberFactoryApi(Protocol):
+    def __call__(
+        self,
+        topic: str,
+        message_type: object,
+        callback: Callable[[object], None],
+        queue_length: int = 0,
+    ) -> ArmActionMonitorApi: ...
+
+
 @dataclass(frozen=True, slots=True)
 class UnitreeBindings:
     channel: ChannelApi
     create_loco_client: Callable[[], G1LocoClientApi]
     create_arm_action_client: Callable[[], G1ArmActionClientApi] | None = None
+    create_arm_action_monitor: (
+        Callable[[Callable[[str], None]], ArmActionMonitorApi] | None
+    ) = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ArmActionSample:
+    sequence: int
+    action_id: int
+    action_name: str
+    holding: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +122,14 @@ class UnitreeG1Adapter:
         self._bindings = bindings
         self._loco: G1LocoClientApi | None = None
         self._arm_action: G1ArmActionClientApi | None = None
+        self._arm_action_monitor: ArmActionMonitorApi | None = None
         self._channel_ready = False
         self._lock = asyncio.Lock()
         self._native_lock = threading.Lock()
+        self._arm_action_condition = threading.Condition()
+        self._arm_action_sequence = 0
+        self._arm_action_samples: deque[_ArmActionSample] = deque(maxlen=32)
+        self._wave_started_after_sequence: int | None = None
 
     @property
     def connected(self) -> bool:
@@ -126,6 +166,17 @@ class UnitreeG1Adapter:
         async with self._lock:
             await self._run_native("wave_hand", self._wave_sync)
 
+    async def wait_for_wave_completion(
+        self,
+        arm: str,
+        timeout_s: float,
+    ) -> ActionVerification:
+        if arm != "right":
+            raise RobotCommandError(f"unsupported wave arm: {arm}")
+        if timeout_s <= 0:
+            raise ValueError("wave verification timeout must be greater than zero")
+        return await asyncio.to_thread(self._wait_for_wave_completion_sync, timeout_s)
+
     async def move_velocity(
         self,
         forward_m_s: float,
@@ -160,6 +211,7 @@ class UnitreeG1Adapter:
                 return
             bindings = self._bindings or self._load_bindings()
             channel_ready = False
+            arm_action_monitor: ArmActionMonitorApi | None = None
             try:
                 bindings.channel.initialize(
                     self.config.domain_id,
@@ -174,7 +226,22 @@ class UnitreeG1Adapter:
                     arm_action = bindings.create_arm_action_client()
                     arm_action.set_timeout(self.config.timeout_s)
                     arm_action.init()
+                if (
+                    arm_action is not None
+                    and bindings.create_arm_action_monitor is not None
+                ):
+                    arm_action_monitor = bindings.create_arm_action_monitor(
+                        self._on_arm_action_state
+                    )
+                    arm_action_monitor.init_channel()
             except Exception as exc:
+                if arm_action_monitor is not None:
+                    try:
+                        arm_action_monitor.close_channel()
+                    except Exception:
+                        logger.exception(
+                            "failed to close arm action monitor after connect failure"
+                        )
                 if channel_ready:
                     try:
                         bindings.channel.release()
@@ -187,22 +254,38 @@ class UnitreeG1Adapter:
             self._bindings = bindings
             self._loco = client
             self._arm_action = arm_action
+            self._arm_action_monitor = arm_action_monitor
             self._channel_ready = True
 
     def _close_sync(self) -> None:
         with self._native_lock:
             bindings = self._bindings
+            arm_action_monitor = self._arm_action_monitor
             self._loco = None
             self._arm_action = None
+            self._arm_action_monitor = None
             if not self._channel_ready or bindings is None:
                 return
             self._channel_ready = False
+            with self._arm_action_condition:
+                self._wave_started_after_sequence = None
+                self._arm_action_condition.notify_all()
+            monitor_error: Exception | None = None
+            if arm_action_monitor is not None:
+                try:
+                    arm_action_monitor.close_channel()
+                except Exception as exc:  # noqa: BLE001 - release DDS regardless
+                    monitor_error = exc
             try:
                 bindings.channel.release()
             except Exception as exc:
                 raise RobotCommandError(
                     f"failed to release Unitree DDS: {exc}"
                 ) from exc
+            if monitor_error is not None:
+                raise RobotCommandError(
+                    f"failed to close arm action monitor: {monitor_error}"
+                ) from monitor_error
 
     def _get_fsm_id_sync(self) -> int:
         with self._native_lock:
@@ -222,11 +305,127 @@ class UnitreeG1Adapter:
                 # The arm-action service is the supported G1 preset-action API.
                 # Action 25 is the built-in face wave; unlike the legacy loco
                 # task endpoint it reports unsupported FSM states explicitly.
+                with self._arm_action_condition:
+                    self._wave_started_after_sequence = self._arm_action_sequence
                 status = self._arm_action.execute_action(25)
                 self._require_success("face wave", status)
                 return
+            with self._arm_action_condition:
+                self._wave_started_after_sequence = None
             status = self._require_loco().wave_hand(False)
             self._require_success("wave_hand", status)
+
+    def _on_arm_action_state(self, payload: str) -> None:
+        try:
+            decoded = json.loads(payload)
+            if not isinstance(decoded, dict):
+                return
+            action_id = decoded.get("id")
+            action_name = decoded.get("name")
+            holding = decoded.get("holding")
+            if (
+                not isinstance(action_id, int)
+                or isinstance(action_id, bool)
+                or not isinstance(action_name, str)
+                or not isinstance(holding, bool)
+            ):
+                return
+        except (TypeError, ValueError):
+            logger.warning("ignored invalid G1 arm action state: %r", payload)
+            return
+
+        with self._arm_action_condition:
+            self._arm_action_sequence += 1
+            self._arm_action_samples.append(
+                _ArmActionSample(
+                    sequence=self._arm_action_sequence,
+                    action_id=action_id,
+                    action_name=action_name,
+                    holding=holding,
+                )
+            )
+            self._arm_action_condition.notify_all()
+
+    def _wait_for_wave_completion_sync(
+        self,
+        timeout_s: float,
+    ) -> ActionVerification:
+        with self._arm_action_condition:
+            marker = self._wave_started_after_sequence
+            if self._arm_action_monitor is None or marker is None:
+                return ActionVerification(
+                    completed=False,
+                    observable=False,
+                    message=(
+                        "wave command was accepted, but completion feedback is "
+                        "unavailable"
+                    ),
+                    details={"method": "rt/arm/action/state"},
+                )
+
+            deadline = time.monotonic() + timeout_s
+            wave_sample: _ArmActionSample | None = None
+            while True:
+                for sample in self._arm_action_samples:
+                    if sample.sequence <= marker:
+                        continue
+                    if wave_sample is None and sample.action_id == 25:
+                        wave_sample = sample
+                        continue
+                    if wave_sample is not None and sample.action_id == 99:
+                        return ActionVerification(
+                            completed=True,
+                            observable=True,
+                            message="wave completion verified",
+                            details={
+                                "method": "rt/arm/action/state",
+                                "action_id": wave_sample.action_id,
+                                "action_name": wave_sample.action_name,
+                                "release_action_id": sample.action_id,
+                            },
+                        )
+                    if (
+                        wave_sample is not None
+                        and sample.sequence > wave_sample.sequence
+                        and sample.action_id != 25
+                    ):
+                        return ActionVerification(
+                            completed=False,
+                            observable=True,
+                            message=(
+                                "wave was interrupted by another arm action before "
+                                "completion"
+                            ),
+                            details={
+                                "method": "rt/arm/action/state",
+                                "wave_observed": True,
+                                "interrupting_action_id": sample.action_id,
+                                "interrupting_action_name": sample.action_name,
+                            },
+                        )
+
+                if not self.connected:
+                    return ActionVerification(
+                        completed=False,
+                        observable=True,
+                        message="robot disconnected before wave completion was verified",
+                        details={
+                            "method": "rt/arm/action/state",
+                            "wave_observed": wave_sample is not None,
+                        },
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return ActionVerification(
+                        completed=False,
+                        observable=True,
+                        message="wave completion feedback timed out",
+                        details={
+                            "method": "rt/arm/action/state",
+                            "wave_observed": wave_sample is not None,
+                        },
+                    )
+                self._arm_action_condition.wait(timeout=remaining)
 
     def _move_sync(
         self,
@@ -281,13 +480,44 @@ class UnitreeG1Adapter:
                 if callable(arm_factory_object)
                 else None
             )
+            monitor_factory = UnitreeG1Adapter._load_arm_action_monitor_factory(
+                channel_module
+            )
             return UnitreeBindings(
                 channel=channel,
                 create_loco_client=loco_factory,
                 create_arm_action_client=arm_factory,
+                create_arm_action_monitor=monitor_factory,
             )
         except (ImportError, AttributeError) as exc:
             raise RobotCommandError(
                 "Unitree SDK2 Python bindings are unavailable; install "
                 "~/unitree_sdk2/unitree_sdk2_bindings on the Linux robot host"
             ) from exc
+
+    @staticmethod
+    def _load_arm_action_monitor_factory(
+        channel_module: object,
+    ) -> Callable[[Callable[[str], None]], ArmActionMonitorApi] | None:
+        try:
+            ros2_module = importlib.import_module("unitree_sdk2_cpp.idl.ros2")
+            string_type = getattr(ros2_module, "String")  # noqa: B009
+            subscriber_factory = cast(
+                _ChannelSubscriberFactoryApi,
+                cast(object, getattr(channel_module, "ChannelSubscriber")),  # noqa: B009
+            )
+        except (ImportError, AttributeError):
+            return None
+
+        def create_monitor(callback: Callable[[str], None]) -> ArmActionMonitorApi:
+            def on_message(message: object) -> None:
+                callback(cast(_StringMessageApi, message).data)
+
+            return subscriber_factory(
+                "rt/arm/action/state",
+                string_type,
+                on_message,
+                8,
+            )
+
+        return create_monitor

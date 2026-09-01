@@ -21,5 +21,14 @@ class RobotSkill[ArgsT: SkillArgs](ABC):
     async def execute(self, ctx: SkillContext, args: ArgsT) -> SkillResult:
         """Execute the skill after its arguments and preconditions are valid."""
 
+    async def verify(
+        self,
+        ctx: SkillContext,
+        args: ArgsT,
+        result: SkillResult,
+    ) -> SkillResult:
+        """Verify postconditions before the result is returned as successful."""
+        return result
+
     async def cleanup(self, ctx: SkillContext, args: ArgsT) -> None:
         """Release skill-local state after an attempted execution."""

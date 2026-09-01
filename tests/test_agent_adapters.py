@@ -17,7 +17,12 @@ from agent import AgentError, RobotAgent
 from app.main import _run_turn
 from app.wave import run_wave
 from core.runtime import SkillRuntime
-from robot import RobotCommandError, RobotState, SimulatedRobotAdapter
+from robot import (
+    ActionVerification,
+    RobotCommandError,
+    RobotState,
+    SimulatedRobotAdapter,
+)
 from skills.motions import WaveSkill
 
 
@@ -51,6 +56,17 @@ class FailingRobotAdapter:
 
     async def wave(self, arm: str) -> None:
         raise RobotCommandError("wave rejected")
+
+    async def wait_for_wave_completion(
+        self,
+        arm: str,
+        timeout_s: float,
+    ) -> ActionVerification:
+        return ActionVerification(
+            completed=False,
+            observable=False,
+            message="wave feedback unavailable",
+        )
 
     async def move_velocity(
         self,
