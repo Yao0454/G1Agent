@@ -1,6 +1,6 @@
 """In-process robot adapter for Agent and tool development without hardware."""
 
-from .base import RobotState
+from .base import ActionVerification, RobotState
 
 
 class SimulatedRobotAdapter:
@@ -15,6 +15,18 @@ class SimulatedRobotAdapter:
 
     async def wave(self, arm: str) -> None:
         self.events.append(("wave", arm))
+
+    async def wait_for_wave_completion(
+        self,
+        arm: str,
+        timeout_s: float,
+    ) -> ActionVerification:
+        return ActionVerification(
+            completed=True,
+            observable=True,
+            message="simulated wave completed",
+            details={"arm": arm, "method": "simulation"},
+        )
 
     async def move_velocity(
         self,

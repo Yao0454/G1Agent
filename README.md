@@ -70,6 +70,11 @@ uv run g1-wave --hardware --network eth0
 `SkillRuntime -> SkillExecutor -> SkillRegistry -> WaveSkill -> UnitreeG1Adapter -> bindings`，
 不导入 Agent，也不调用 LLM。`--hardware` 会直接连接真机，没有二次交互确认。
 
+SkillExecutor 会在同一资源锁和执行超时内运行 `execute() -> verify() -> cleanup()`。
+真机 Wave 只有从 `rt/arm/action/state` 依次观察到 `face wave`（动作 ID `25`）和
+`release arm`（动作 ID `99`）后才返回 `succeeded`。如果命令被接受但动作反馈不可用
+或超时，返回 `verification_failed`，不会把接受码误报为动作完成。
+
 ## 安装
 
 安装项目依赖并准备 Ollama：
@@ -226,7 +231,9 @@ Decision Agent 的技能目录由当前 `SkillRegistry` 动态生成，新增 Sk
 `wave` 使用 G1 `G1ArmActionClient` 的内置 `face wave`（动作 ID `25`）；如果当前
 bindings 没有该客户端，则回退到 `LocoClient.wave_hand()`。内置手臂动作只支持
 FSM `500`、`501`、`801`（FSM `801` 还要求 mode `0` 或 `3`）。SDK 返回 `0` 只表示
-命令被服务接受，不表示动作已经完成；程序会把非零状态转换成可读的失败原因。
+命令被服务接受，不表示动作已经完成；程序会把非零状态转换成可读的失败原因，并
+通过 `rt/arm/action/state` 完成后置验证。旧 bindings 的 fallback 没有这个反馈，
+因此即使命令已发出也会诚实返回 `verification_failed`。
 
 多台 RealSense 同时连接时可增加 `--camera-serial <serial>`。默认读取
 `640x480@30 FPS` 的彩色和深度流，将深度对齐到彩色画面，并忽略有效深度超过

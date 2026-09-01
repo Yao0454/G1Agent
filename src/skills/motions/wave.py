@@ -5,6 +5,7 @@ from typing import Literal
 from core.context import SkillContext
 from core.models import SkillArgs, SkillMetadata, SkillResult
 from core.skill import RobotSkill
+from core.types import FailureCode, SkillStatus
 
 
 class WaveArgs(SkillArgs):
@@ -43,4 +44,38 @@ class WaveSkill(RobotSkill[WaveArgs]):
 
     async def execute(self, ctx: SkillContext, args: WaveArgs) -> SkillResult:
         await ctx.robot.wave(args.arm)
-        return SkillResult.ok("wave completed", arm=args.arm)
+        return SkillResult.ok(
+            "wave command accepted",
+            arm=args.arm,
+            command_accepted=True,
+        )
+
+    async def verify(
+        self,
+        ctx: SkillContext,
+        args: WaveArgs,
+        result: SkillResult,
+    ) -> SkillResult:
+        verification = await ctx.robot.wait_for_wave_completion(
+            args.arm,
+            timeout_s=6.0,
+        )
+        details = {
+            "observable": verification.observable,
+            "completed": verification.completed,
+            **verification.details,
+        }
+        if not verification.completed:
+            failure = SkillResult.fail(
+                SkillStatus.VERIFICATION_FAILED,
+                verification.message,
+                failure_code=FailureCode.VERIFICATION_FAILED,
+                arm=args.arm,
+                command_accepted=True,
+            )
+            failure.verification = details
+            return failure
+
+        result.message = verification.message
+        result.verification = details
+        return result

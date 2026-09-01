@@ -83,7 +83,7 @@ class SkillExecutor:
                     recoverable=True,
                 )
             return await asyncio.wait_for(
-                skill.execute(ctx, args),
+                self._execute_and_verify(skill, ctx, args),
                 timeout=skill.metadata.timeout_s,
             )
         except TimeoutError:
@@ -111,6 +111,17 @@ class SkillExecutor:
                 await skill.cleanup(ctx, args)
             except Exception:
                 logger.exception("skill cleanup failed: %s", skill.metadata.name)
+
+    @staticmethod
+    async def _execute_and_verify(
+        skill: RobotSkill[SkillArgs],
+        ctx: SkillContext,
+        args: SkillArgs,
+    ) -> SkillResult:
+        result = await skill.execute(ctx, args)
+        if not result.success:
+            return result
+        return await skill.verify(ctx, args, result)
 
     @staticmethod
     def _finish(result: SkillResult, started: float) -> SkillResult:
