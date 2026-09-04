@@ -9,13 +9,16 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 
 from .base import ActionVerification, RobotCommandError, RobotState
+from .g1_actions import G1_ARM_ACTION_NAMES
 
 logger = logging.getLogger(__name__)
+
+_ARM_ACTION_FEEDBACK_PROBE_S = 1.0
 
 
 class ChannelApi(Protocol):
@@ -31,7 +34,37 @@ class G1LocoClientApi(Protocol):
 
     def get_fsm_id(self) -> tuple[int, int]: ...
 
+    def get_fsm_mode(self) -> tuple[int, int]: ...
+
+    def get_balance_mode(self) -> tuple[int, int]: ...
+
+    def damp(self) -> int: ...
+
+    def start(self) -> int: ...
+
+    def squat(self) -> int: ...
+
+    def sit(self) -> int: ...
+
+    def stand_up(self) -> int: ...
+
+    def zero_torque(self) -> int: ...
+
+    def high_stand(self) -> int: ...
+
+    def low_stand(self) -> int: ...
+
+    def balance_stand(self) -> int: ...
+
+    def continuous_gait(self, flag: bool) -> int: ...
+
+    def switch_move_mode(self, flag: bool) -> int: ...
+
     def wave_hand(self, turn_flag: bool = False) -> int: ...
+
+    def shake_hand(self, stage: int = -1) -> int: ...
+
+    def set_speed_mode(self, mode: int) -> int: ...
 
     def stop_move(self) -> int: ...
 
@@ -129,7 +162,8 @@ class UnitreeG1Adapter:
         self._arm_action_condition = threading.Condition()
         self._arm_action_sequence = 0
         self._arm_action_samples: deque[_ArmActionSample] = deque(maxlen=32)
-        self._wave_started_after_sequence: int | None = None
+        self._arm_action_markers: dict[int, int] = {}
+        self._legacy_handshake_active = False
 
     @property
     def connected(self) -> bool:
@@ -149,11 +183,14 @@ class UnitreeG1Adapter:
         async with self._lock:
             if not self.connected:
                 return RobotState(hardware=True, connected=False)
-            fsm_id = await self._run_native("get_fsm_id", self._get_fsm_id_sync)
+            details = await self._run_native(
+                "get_robot_state",
+                self._get_robot_state_sync,
+            )
             return RobotState(
                 hardware=True,
                 connected=True,
-                details={"fsm_id": fsm_id},
+                details=details,
             )
 
     async def stop(self) -> None:
@@ -175,7 +212,65 @@ class UnitreeG1Adapter:
             raise RobotCommandError(f"unsupported wave arm: {arm}")
         if timeout_s <= 0:
             raise ValueError("wave verification timeout must be greater than zero")
-        return await asyncio.to_thread(self._wait_for_wave_completion_sync, timeout_s)
+        verification = await self.wait_for_arm_action_completion(
+            25,
+            "wave",
+            timeout_s,
+        )
+        return ActionVerification(
+            completed=verification.completed,
+            observable=verification.observable,
+            message=verification.message,
+            details={
+                **verification.details,
+                "wave_observed": verification.details.get(
+                    "action_observed",
+                    False,
+                ),
+            },
+        )
+
+    async def execute_arm_action(
+        self,
+        action_id: int,
+        action_name: str,
+    ) -> None:
+        async with self._lock:
+            await self._run_native(
+                action_name,
+                lambda: self._execute_arm_action_sync(action_id, action_name),
+            )
+
+    async def wait_for_arm_action_completion(
+        self,
+        action_id: int,
+        action_name: str,
+        timeout_s: float,
+    ) -> ActionVerification:
+        if timeout_s <= 0:
+            raise ValueError("arm action timeout must be greater than zero")
+        return await asyncio.to_thread(
+            self._wait_for_arm_action_completion_sync,
+            action_id,
+            action_name,
+            timeout_s,
+        )
+
+    async def release_arm(self) -> None:
+        async with self._lock:
+            await self._run_native("release arm", self._release_arm_sync)
+
+    async def execute_loco_action(
+        self,
+        action: str,
+        arguments: Mapping[str, object] | None = None,
+    ) -> None:
+        action_arguments = dict(arguments or {})
+        async with self._lock:
+            await self._run_native(
+                action,
+                lambda: self._execute_loco_action_sync(action, action_arguments),
+            )
 
     async def move_velocity(
         self,
@@ -268,7 +363,8 @@ class UnitreeG1Adapter:
                 return
             self._channel_ready = False
             with self._arm_action_condition:
-                self._wave_started_after_sequence = None
+                self._arm_action_markers.clear()
+                self._legacy_handshake_active = False
                 self._arm_action_condition.notify_all()
             monitor_error: Exception | None = None
             if arm_action_monitor is not None:
@@ -287,12 +383,24 @@ class UnitreeG1Adapter:
                     f"failed to close arm action monitor: {monitor_error}"
                 ) from monitor_error
 
-    def _get_fsm_id_sync(self) -> int:
+    def _get_robot_state_sync(self) -> dict[str, object]:
         with self._native_lock:
             client = self._require_loco()
             status, fsm_id = client.get_fsm_id()
             self._require_success("get_fsm_id", status)
-            return fsm_id
+            details: dict[str, object] = {"fsm_id": fsm_id}
+            for key, method_name in (
+                ("fsm_mode", "get_fsm_mode"),
+                ("balance_mode", "get_balance_mode"),
+            ):
+                method = getattr(client, method_name, None)
+                if not callable(method):
+                    continue
+                value_status, value = method()
+                self._require_success(method_name, value_status)
+                details[key] = value
+            details["arm_action_presets"] = self._arm_action is not None
+            return details
 
     def _stop_sync(self) -> None:
         with self._native_lock:
@@ -300,20 +408,7 @@ class UnitreeG1Adapter:
             self._require_success("stop_move", status)
 
     def _wave_sync(self) -> None:
-        with self._native_lock:
-            if self._arm_action is not None:
-                # The arm-action service is the supported G1 preset-action API.
-                # Action 25 is the built-in face wave; unlike the legacy loco
-                # task endpoint it reports unsupported FSM states explicitly.
-                with self._arm_action_condition:
-                    self._wave_started_after_sequence = self._arm_action_sequence
-                status = self._arm_action.execute_action(25)
-                self._require_success("face wave", status)
-                return
-            with self._arm_action_condition:
-                self._wave_started_after_sequence = None
-            status = self._require_loco().wave_hand(False)
-            self._require_success("wave_hand", status)
+        self._execute_arm_action_sync(25, "face wave")
 
     def _on_arm_action_state(self, payload: str) -> None:
         try:
@@ -346,59 +441,176 @@ class UnitreeG1Adapter:
             )
             self._arm_action_condition.notify_all()
 
-    def _wait_for_wave_completion_sync(
+    def _execute_arm_action_sync(
         self,
+        action_id: int,
+        action_name: str,
+    ) -> None:
+        if action_id not in G1_ARM_ACTION_NAMES:
+            raise RobotCommandError(f"unsupported G1 arm action id: {action_id}")
+        if action_id == 99:
+            self._release_arm_sync()
+            return
+
+        with self._native_lock:
+            if self._arm_action is not None:
+                with self._arm_action_condition:
+                    self._arm_action_markers[action_id] = self._arm_action_sequence
+                status = self._arm_action.execute_action(action_id)
+                try:
+                    self._require_success(action_name, status)
+                except RobotCommandError:
+                    with self._arm_action_condition:
+                        self._arm_action_markers.pop(action_id, None)
+                    raise
+                return
+
+            with self._arm_action_condition:
+                self._arm_action_markers.pop(action_id, None)
+            loco = self._require_loco()
+            if action_id == 25:
+                status = loco.wave_hand(False)
+                self._require_success("wave_hand", status)
+                return
+            if action_id == 27:
+                status = loco.shake_hand(0)
+                self._require_success("shake_hand stage 0", status)
+                self._legacy_handshake_active = True
+                return
+            raise RobotCommandError(
+                f"{action_name} requires G1ArmActionClient support"
+            )
+
+    def _release_arm_sync(self) -> None:
+        with self._native_lock:
+            if self._arm_action is not None:
+                status = self._arm_action.execute_action(99)
+                self._require_success("release arm", status)
+                return
+            if not self._legacy_handshake_active:
+                return
+            status = self._require_loco().shake_hand(1)
+            self._require_success("shake_hand stage 1", status)
+            self._legacy_handshake_active = False
+
+    def _execute_loco_action_sync(
+        self,
+        action: str,
+        arguments: Mapping[str, object],
+    ) -> None:
+        with self._native_lock:
+            loco = self._require_loco()
+            no_argument_actions = {
+                "damp": loco.damp,
+                "start": loco.start,
+                "squat": loco.squat,
+                "sit": loco.sit,
+                "stand_up": loco.stand_up,
+                "zero_torque": loco.zero_torque,
+                "high_stand": loco.high_stand,
+                "low_stand": loco.low_stand,
+                "balance_stand": loco.balance_stand,
+                "wave_with_turn": lambda: loco.wave_hand(True),
+            }
+            function = no_argument_actions.get(action)
+            if function is not None:
+                if arguments:
+                    raise RobotCommandError(
+                        f"{action} does not accept arguments: {sorted(arguments)}"
+                    )
+                self._require_success(action, function())
+                return
+
+            if action in {"continuous_gait", "switch_move_mode"}:
+                enabled = arguments.get("enabled")
+                if not isinstance(enabled, bool) or len(arguments) != 1:
+                    raise RobotCommandError(
+                        f"{action} requires exactly one boolean 'enabled' argument"
+                    )
+                method = (
+                    loco.continuous_gait
+                    if action == "continuous_gait"
+                    else loco.switch_move_mode
+                )
+                self._require_success(action, method(enabled))
+                return
+
+            if action == "set_speed_mode":
+                mode = arguments.get("mode")
+                if (
+                    not isinstance(mode, int)
+                    or isinstance(mode, bool)
+                    or len(arguments) != 1
+                ):
+                    raise RobotCommandError(
+                        "set_speed_mode requires exactly one integer 'mode' argument"
+                    )
+                self._require_success(action, loco.set_speed_mode(mode))
+                return
+
+            raise RobotCommandError(f"unsupported G1 loco action: {action}")
+
+    def _wait_for_arm_action_completion_sync(
+        self,
+        action_id: int,
+        action_name: str,
         timeout_s: float,
     ) -> ActionVerification:
         with self._arm_action_condition:
-            marker = self._wave_started_after_sequence
+            marker = self._arm_action_markers.get(action_id)
             if self._arm_action_monitor is None or marker is None:
                 return ActionVerification(
                     completed=False,
                     observable=False,
                     message=(
-                        "wave command was accepted, but completion feedback is "
-                        "unavailable"
+                        f"{action_name} command was accepted, but completion "
+                        "feedback is unavailable"
                     ),
-                    details={"method": "rt/arm/action/state"},
+                    details={
+                        "method": "rt/arm/action/state",
+                        "action_observed": False,
+                    },
                 )
 
-            deadline = time.monotonic() + timeout_s
-            wave_sample: _ArmActionSample | None = None
+            started = time.monotonic()
+            deadline = started + timeout_s
+            probe_deadline = min(deadline, started + _ARM_ACTION_FEEDBACK_PROBE_S)
+            action_sample: _ArmActionSample | None = None
             while True:
                 for sample in self._arm_action_samples:
                     if sample.sequence <= marker:
                         continue
-                    if wave_sample is None and sample.action_id == 25:
-                        wave_sample = sample
+                    if action_sample is None and sample.action_id == action_id:
+                        action_sample = sample
                         continue
-                    if wave_sample is not None and sample.action_id == 99:
+                    if action_sample is not None and sample.action_id == 99:
                         return ActionVerification(
                             completed=True,
                             observable=True,
-                            message="wave completion verified",
+                            message=f"{action_name} completion verified",
                             details={
                                 "method": "rt/arm/action/state",
-                                "action_id": wave_sample.action_id,
-                                "action_name": wave_sample.action_name,
+                                "action_observed": True,
+                                "action_id": action_sample.action_id,
+                                "action_name": action_sample.action_name,
                                 "release_action_id": sample.action_id,
                             },
                         )
                     if (
-                        wave_sample is not None
-                        and sample.sequence > wave_sample.sequence
-                        and sample.action_id != 25
+                        action_sample is not None
+                        and sample.sequence > action_sample.sequence
+                        and sample.action_id != action_id
                     ):
                         return ActionVerification(
                             completed=False,
                             observable=True,
                             message=(
-                                "wave was interrupted by another arm action before "
-                                "completion"
+                                f"{action_name} was interrupted by another arm "
+                                "action before completion"
                             ),
                             details={
                                 "method": "rt/arm/action/state",
-                                "wave_observed": True,
+                                "action_observed": True,
                                 "interrupting_action_id": sample.action_id,
                                 "interrupting_action_name": sample.action_name,
                             },
@@ -408,24 +620,42 @@ class UnitreeG1Adapter:
                     return ActionVerification(
                         completed=False,
                         observable=True,
-                        message="robot disconnected before wave completion was verified",
+                        message=(
+                            "robot disconnected before "
+                            f"{action_name} completion was verified"
+                        ),
                         details={
                             "method": "rt/arm/action/state",
-                            "wave_observed": wave_sample is not None,
+                            "action_observed": action_sample is not None,
                         },
                     )
-                remaining = deadline - time.monotonic()
+                active_deadline = (
+                    deadline if action_sample is not None else probe_deadline
+                )
+                remaining = active_deadline - time.monotonic()
                 if remaining <= 0:
                     return ActionVerification(
                         completed=False,
-                        observable=True,
-                        message="wave completion feedback timed out",
+                        observable=action_sample is not None,
+                        message=f"{action_name} completion feedback timed out",
                         details={
                             "method": "rt/arm/action/state",
-                            "wave_observed": wave_sample is not None,
+                            "action_observed": action_sample is not None,
+                            "holding": (
+                                action_sample.holding
+                                if action_sample is not None
+                                else None
+                            ),
                         },
                     )
                 self._arm_action_condition.wait(timeout=remaining)
+
+    # Kept for callers written against the original wave-only adapter.
+    def _wait_for_wave_completion_sync(
+        self,
+        timeout_s: float,
+    ) -> ActionVerification:
+        return self._wait_for_arm_action_completion_sync(25, "wave", timeout_s)
 
     def _move_sync(
         self,

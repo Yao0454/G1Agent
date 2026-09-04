@@ -64,6 +64,8 @@ DecisionAction = Literal[
     "execute_skill",
     "speak",
     "execute_and_speak",
+    "continue",
+    "interrupt",
     "ignore",
 ]
 
@@ -110,13 +112,21 @@ class AgentDecision(BaseModel):
             if not has_speech:
                 payload["action"] = "execute_skill"
             return payload
-        if action == "ignore":
+        if action in {"continue", "interrupt", "ignore"}:
             if has_skill or has_arguments:
                 payload["action"] = "execute_and_speak" if has_speech else "execute_skill"
             elif has_speech:
                 payload["action"] = "speak"
             return payload
 
+        if action in {"stop", "cancel"} and not has_skill and not has_arguments:
+            payload["action"] = "interrupt"
+            payload.pop("speech", None)
+            return payload
+        if action in {"keep", "keep_going"} and not has_skill and not has_arguments:
+            payload["action"] = "continue"
+            payload.pop("speech", None)
+            return payload
         if action in {"none", "no_action", "noop"} and not has_skill and not has_arguments:
             payload["action"] = "speak" if has_speech else "ignore"
             return payload

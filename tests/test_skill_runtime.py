@@ -18,6 +18,7 @@ from robot.unitree_adapter import (
     UnitreeG1Config,
 )
 from skills.motions import MoveBackwardSkill, WaveSkill
+from skills.motions.wave import WAVE_VERIFICATION_TIMEOUT_S
 
 
 class FakeRobotAdapter:
@@ -146,6 +147,12 @@ class VerificationSkill(RobotSkill[EmptyArgs]):
 
 
 class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_wave_timeout_budget_includes_feedback_verification(self) -> None:
+        self.assertGreater(
+            WaveSkill.metadata.timeout_s,
+            10.0 + WAVE_VERIFICATION_TIMEOUT_S,
+        )
+
     async def test_wave_runs_through_runtime(self) -> None:
         robot = FakeRobotAdapter()
         runtime = SkillRuntime(robot)
@@ -157,7 +164,11 @@ class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, SkillStatus.SUCCEEDED)
         self.assertEqual(
             result.data,
-            {"arm": "right", "command_accepted": True},
+            {
+                "arm": "right",
+                "command_accepted": True,
+                "completion_verified": True,
+            },
         )
         self.assertEqual(
             result.verification,
@@ -435,7 +446,7 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def test_legacy_wave_is_not_completed_without_feedback(self) -> None:
+    async def test_legacy_wave_succeeds_with_unverified_completion(self) -> None:
         channel = FakeChannel()
         client = FakeLocoClient()
         adapter = self.build_adapter(channel, client)
@@ -447,8 +458,8 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
         state = await adapter.get_state()
         await adapter.close()
 
-        self.assertFalse(result.success)
-        self.assertEqual(result.status, SkillStatus.VERIFICATION_FAILED)
+        self.assertTrue(result.success)
+        self.assertFalse(result.data["completion_verified"])
         self.assertFalse(result.verification["observable"])
         self.assertEqual(channel.initialize_calls, [(7, "eth0")])
         self.assertEqual(channel.release_count, 1)
@@ -508,7 +519,7 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(monitor.init_count, 1)
             self.assertEqual(monitor.close_count, 1)
 
-    async def test_wave_fails_verification_without_arm_action_monitor(self) -> None:
+    async def test_wave_succeeds_without_arm_action_monitor(self) -> None:
         channel = FakeChannel()
         loco = FakeLocoClient()
         arm = FakeArmActionClient()
@@ -527,9 +538,39 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
         result = await runtime.execute("wave")
         await adapter.close()
 
-        self.assertEqual(result.status, SkillStatus.VERIFICATION_FAILED)
-        self.assertEqual(result.failure_code, FailureCode.VERIFICATION_FAILED)
+        self.assertTrue(result.success)
+        self.assertFalse(result.data["completion_verified"])
         self.assertFalse(result.verification["observable"])
+
+    async def test_idle_feedback_is_not_action_completion_feedback(self) -> None:
+        channel = FakeChannel()
+        loco = FakeLocoClient()
+        arm = FakeArmActionClient()
+
+        def create_monitor(callback: Callable[[str], None]) -> FakeArmActionMonitor:
+            monitor = FakeArmActionMonitor(callback)
+            arm.on_execute = lambda _: monitor.emit(
+                '{"holding":false,"id":0,"name":""}'
+            )
+            return monitor
+
+        adapter = UnitreeG1Adapter(
+            bindings=UnitreeBindings(
+                channel=channel,
+                create_loco_client=lambda: loco,
+                create_arm_action_client=lambda: arm,
+                create_arm_action_monitor=create_monitor,
+            )
+        )
+
+        adapter._connect_sync()
+        adapter._wave_sync()
+        verification = adapter._wait_for_wave_completion_sync(0.01)
+        adapter._close_sync()
+
+        self.assertFalse(verification.completed)
+        self.assertFalse(verification.observable)
+        self.assertFalse(verification.details["wave_observed"])
 
     async def test_wave_fails_verification_when_another_action_interrupts(self) -> None:
         channel = FakeChannel()

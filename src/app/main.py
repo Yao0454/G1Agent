@@ -16,7 +16,7 @@ from adapters import (
 from agent import AgentError, RobotAgent
 from core.runtime import SkillRuntime
 from robot import RobotAdapter, SimulatedRobotAdapter, UnitreeG1Adapter, UnitreeG1Config
-from skills.motions import MoveBackwardSkill, WaveSkill
+from skills import register_g1_skills
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,8 +77,7 @@ async def run(args: argparse.Namespace) -> None:
         robot = SimulatedRobotAdapter()
 
     runtime = SkillRuntime(robot)
-    runtime.register(WaveSkill())
-    runtime.register(MoveBackwardSkill())
+    register_g1_skills(runtime)
     agent = RobotAgent(runtime, model_name=args.model, base_url=args.ollama_url)
     microphone = (
         MicrophoneASR(

@@ -7,6 +7,10 @@ from core.models import SkillArgs, SkillMetadata, SkillResult
 from core.skill import RobotSkill
 from core.types import FailureCode, SkillStatus
 
+from .arm_actions import check_arm_action_preconditions
+
+WAVE_VERIFICATION_TIMEOUT_S = 6.0
+
 
 class WaveArgs(SkillArgs):
     arm: Literal["right"] = "right"
@@ -17,8 +21,10 @@ class WaveSkill(RobotSkill[WaveArgs]):
         name="wave",
         description="Wave the robot's right hand as a social gesture.",
         tags=("gesture", "social"),
-        required_resources=("right_arm",),
-        timeout_s=10.0,
+        required_resources=("upper_body",),
+        # The G1 action RPC can consume its 10 s client timeout before
+        # post-action feedback is observed. Keep both phases inside this budget.
+        timeout_s=20.0,
     )
     args_model = WaveArgs
 
@@ -27,20 +33,7 @@ class WaveSkill(RobotSkill[WaveArgs]):
         ctx: SkillContext,
         args: WaveArgs,
     ) -> tuple[bool, str]:
-        state = await ctx.robot.get_state()
-        if state.hardware and not state.connected:
-            return False, "robot is not connected"
-        if state.hardware:
-            fsm_id = state.details.get("fsm_id")
-            if fsm_id not in {500, 501, 801}:
-                return (
-                    False,
-                    (
-                        f"G1 FSM {fsm_id!r} does not support arm actions; "
-                        "enter a supported Sport mode first"
-                    ),
-                )
-        return True, ""
+        return await check_arm_action_preconditions(ctx)
 
     async def execute(self, ctx: SkillContext, args: WaveArgs) -> SkillResult:
         await ctx.robot.wave(args.arm)
@@ -58,13 +51,20 @@ class WaveSkill(RobotSkill[WaveArgs]):
     ) -> SkillResult:
         verification = await ctx.robot.wait_for_wave_completion(
             args.arm,
-            timeout_s=6.0,
+            timeout_s=WAVE_VERIFICATION_TIMEOUT_S,
         )
         details = {
             "observable": verification.observable,
             "completed": verification.completed,
             **verification.details,
         }
+        if not verification.completed and not verification.observable:
+            result.message = (
+                "wave command accepted; completion feedback unavailable"
+            )
+            result.data["completion_verified"] = False
+            result.verification = details
+            return result
         if not verification.completed:
             failure = SkillResult.fail(
                 SkillStatus.VERIFICATION_FAILED,
@@ -77,5 +77,6 @@ class WaveSkill(RobotSkill[WaveArgs]):
             return failure
 
         result.message = verification.message
+        result.data["completion_verified"] = True
         result.verification = details
         return result

@@ -23,6 +23,8 @@ for line in sys.stdin:
                 "nearest_person_distance_m": 1.25,
                 "confidence": 0.9,
                 "source": "realsense:test",
+                "nearest_obstacle_distance_m": 0.75,
+                "rgb_jpeg_base64": "anBlZw==",
             },
         }), flush=True)
     elif request.get("command") == "close":
@@ -51,12 +53,16 @@ class RealSenseBridgeTests(unittest.TestCase):
             bridge.open()
             first = bridge.capture()
             second = bridge.capture()
+            frame = bridge.capture_frame()
             bridge.close()
 
         self.assertEqual(first.person_count, 1)
         self.assertEqual(first.nearest_person_distance_m, 1.25)
         self.assertEqual(first.source, "realsense:test")
         self.assertEqual(second, first)
+        self.assertEqual(frame.rgb, b"jpeg")
+        self.assertEqual(frame.nearest_obstacle_distance_m, 0.75)
+        self.assertEqual(frame.observation, first)
         self.assertFalse(bridge.opened)
 
 

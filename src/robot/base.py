@@ -1,5 +1,6 @@
 """Hardware-independent robot operations required by V0.1 skills."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -37,6 +38,27 @@ class RobotAdapter(Protocol):
         arm: str,
         timeout_s: float,
     ) -> ActionVerification: ...
+
+    async def execute_arm_action(
+        self,
+        action_id: int,
+        action_name: str,
+    ) -> None: ...
+
+    async def wait_for_arm_action_completion(
+        self,
+        action_id: int,
+        action_name: str,
+        timeout_s: float,
+    ) -> ActionVerification: ...
+
+    async def release_arm(self) -> None: ...
+
+    async def execute_loco_action(
+        self,
+        action: str,
+        arguments: Mapping[str, object] | None = None,
+    ) -> None: ...
 
     async def move_velocity(
         self,

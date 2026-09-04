@@ -1,6 +1,7 @@
 """Python 3.8-compatible RealSense capture worker used by realsense_bridge."""
 
 import argparse
+import base64
 import json
 import math
 import sys
@@ -70,7 +71,7 @@ class Detector:
             self.close()
             raise
 
-    def capture(self):
+    def capture(self, include_rgb=False):
         frames = self.pipeline.wait_for_frames(self.args.frame_timeout_ms)
         aligned_frames = self.align.process(frames)
         color_frame = aligned_frames.get_color_frame()
@@ -109,7 +110,21 @@ class Detector:
                 distances.append(distance)
             accepted_scores.append(score)
 
-        return {
+        obstacle_distances = []
+        for row in range(7):
+            sample_y = round(height * (0.2 + row * 0.1))
+            for column in range(9):
+                sample_x = round(width * (0.2 + column * 0.075))
+                distance = float(depth_frame.get_distance(sample_x, sample_y))
+                if distance > 0:
+                    obstacle_distances.append(distance)
+        obstacle_distances.sort()
+        nearest_obstacle_distance_m = None
+        if obstacle_distances:
+            index = max(0, round((len(obstacle_distances) - 1) * 0.1))
+            nearest_obstacle_distance_m = obstacle_distances[index]
+
+        result = {
             "observed_at_s": time.monotonic(),
             "person_count": len(accepted_scores),
             "nearest_person_distance_m": min(distances) if distances else None,
@@ -117,7 +132,18 @@ class Detector:
                 confidence(max(accepted_scores)) if accepted_scores else None
             ),
             "source": "realsense:%s" % (self.args.serial or "D435i"),
+            "nearest_obstacle_distance_m": nearest_obstacle_distance_m,
         }
+        if include_rgb:
+            success, encoded = self.cv2.imencode(
+                ".jpg",
+                image,
+                [int(self.cv2.IMWRITE_JPEG_QUALITY), 80],
+            )
+            if not success:
+                raise RuntimeError("failed to encode D435i RGB frame")
+            result["rgb_jpeg_base64"] = base64.b64encode(encoded).decode("ascii")
+        return result
 
     def close(self):
         if self.started:
@@ -135,7 +161,14 @@ def main():
                 request = json.loads(line)
                 command = request.get("command")
                 if command == "capture":
-                    send({"type": "observation", "result": detector.capture()})
+                    send(
+                        {
+                            "type": "observation",
+                            "result": detector.capture(
+                                include_rgb=bool(request.get("include_rgb"))
+                            ),
+                        }
+                    )
                 elif command == "close":
                     detector.close()
                     send({"type": "closed"})

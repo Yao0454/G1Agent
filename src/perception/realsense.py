@@ -9,9 +9,9 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
-from .models import PerceptionResult
+from .models import CameraFrame, PerceptionResult
 from .realsense_bridge import RealSenseBridge, RealSenseBridgeError
 
 logger = logging.getLogger(__name__)
@@ -252,11 +252,14 @@ class RealSensePersonDetector:
                 raise PerceptionError(f"failed to stop RealSense D435i: {exc}") from exc
 
     def capture(self) -> PerceptionResult:
+        return self.capture_frame(include_rgb=False).observation
+
+    def capture_frame(self, *, include_rgb: bool = True) -> CameraFrame:
         with self._lock:
             bridge = self._bridge
             if bridge is not None:
                 try:
-                    return bridge.capture()
+                    return bridge.capture_frame(include_rgb=include_rgb)
                 except RealSenseBridgeError as exc:
                     raise PerceptionError(f"D435i capture failed: {exc}") from exc
             pipeline = self._pipeline
@@ -281,11 +284,34 @@ class RealSensePersonDetector:
                     padding=(8, 8),
                     scale=1.05,
                 )
-                return self._build_result(
+                observed_at_s = time.monotonic()
+                observation = self._build_result(
                     color_frame,
                     depth_frame,
                     rectangles,
                     scores,
+                    observed_at_s=observed_at_s,
+                )
+                return CameraFrame(
+                    observed_at_s=observed_at_s,
+                    rgb=(self._to_rgb_image(image) if include_rgb else None),
+                    depth=(
+                        self._copy_image(
+                            bindings.numpy.asanyarray(depth_frame.get_data())
+                        )
+                        if include_rgb
+                        else None
+                    ),
+                    observation=observation,
+                    nearest_obstacle_distance_m=(
+                        self._sample_obstacle_distance(
+                            depth_frame,
+                            color_frame.get_width(),
+                            color_frame.get_height(),
+                        )
+                        if include_rgb
+                        else None
+                    ),
                 )
             except PerceptionError:
                 raise
@@ -298,6 +324,8 @@ class RealSensePersonDetector:
         depth_frame: _RealSenseDepthFrame,
         rectangles: Sequence[Sequence[int]],
         scores: Sequence[float],
+        *,
+        observed_at_s: float | None = None,
     ) -> PerceptionResult:
         accepted_scores: list[float] = []
         distances: list[float] = []
@@ -327,12 +355,51 @@ class RealSensePersonDetector:
             self._score_to_confidence(max(accepted_scores)) if accepted_scores else None
         )
         return PerceptionResult(
-            observed_at_s=time.monotonic(),
+            observed_at_s=(
+                time.monotonic() if observed_at_s is None else observed_at_s
+            ),
             person_count=len(accepted_scores),
             nearest_person_distance_m=min(distances) if distances else None,
             confidence=confidence,
             source=f"realsense:{self.serial or 'D435i'}",
         )
+
+    @staticmethod
+    def _sample_obstacle_distance(
+        depth_frame: _RealSenseDepthFrame,
+        width: int,
+        height: int,
+    ) -> float | None:
+        distances: list[float] = []
+        for row in range(7):
+            y = round(height * (0.2 + row * 0.1))
+            for column in range(9):
+                x = round(width * (0.2 + column * 0.075))
+                distance = float(
+                    depth_frame.get_distance(
+                        min(max(x, 0), width - 1),
+                        min(max(y, 0), height - 1),
+                    )
+                )
+                if distance > 0:
+                    distances.append(distance)
+        if not distances:
+            return None
+        distances.sort()
+        return distances[max(0, round((len(distances) - 1) * 0.1))]
+
+    @staticmethod
+    def _copy_image(image: object) -> object:
+        copy = getattr(image, "copy", None)
+        return copy() if callable(copy) else image
+
+    @classmethod
+    def _to_rgb_image(cls, image: object) -> object:
+        try:
+            converted = cast(Any, image)[..., ::-1]
+        except (IndexError, TypeError):
+            return cls._copy_image(image)
+        return cls._copy_image(converted)
 
     @staticmethod
     def _score_to_confidence(score: float) -> float:
