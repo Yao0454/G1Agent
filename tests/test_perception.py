@@ -4,7 +4,11 @@ import unittest
 from types import SimpleNamespace
 from typing import cast
 
-from app.perception import _DepthSafetyGate, _ObservationLogGate
+from app.perception import (
+    _DepthSafetyGate,
+    _ObservationLogGate,
+    _RepeatedErrorLogGate,
+)
 from perception import (
     EventDetector,
     PerceptionError,
@@ -338,6 +342,35 @@ class ObservationLogGateTests(unittest.TestCase):
         gate = _ObservationLogGate(interval_s=5.0, verbose=True)
         self.assertTrue(gate.should_print(observation(1.0, people=0)))
         self.assertTrue(gate.should_print(observation(1.1, people=0)))
+
+    def test_state_changes_can_be_periodic_only_for_noisy_detectors(self) -> None:
+        gate = _ObservationLogGate(
+            interval_s=5.0,
+            immediate_state_changes=False,
+        )
+
+        self.assertTrue(gate.should_print(observation(1.0, people=0)))
+        self.assertFalse(gate.should_print(observation(1.1, people=1)))
+        self.assertFalse(gate.should_print(observation(1.2, people=0)))
+        self.assertTrue(gate.should_print(observation(6.0, people=1)))
+
+
+class RepeatedErrorLogGateTests(unittest.TestCase):
+    def test_repeated_errors_are_rate_limited_and_counted(self) -> None:
+        gate = _RepeatedErrorLogGate(interval_s=5.0)
+
+        self.assertEqual(gate.admit("decision", "failed", now_s=1.0), 0)
+        self.assertIsNone(gate.admit("decision", "failed", now_s=2.0))
+        self.assertIsNone(gate.admit("decision", "failed", now_s=3.0))
+        self.assertEqual(gate.admit("decision", "failed", now_s=6.0), 2)
+
+    def test_changed_error_and_recovery_emit_immediately(self) -> None:
+        gate = _RepeatedErrorLogGate(interval_s=5.0)
+
+        self.assertEqual(gate.admit("decision", "first", now_s=1.0), 0)
+        self.assertEqual(gate.admit("execution", "second", now_s=1.1), 0)
+        gate.reset()
+        self.assertEqual(gate.admit("decision", "first", now_s=1.2), 0)
 
 
 class DepthSafetyGateTests(unittest.TestCase):

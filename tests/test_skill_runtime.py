@@ -391,6 +391,14 @@ class FakeLocoClient:
         return self.move_status
 
 
+class PartialStateLocoClient(FakeLocoClient):
+    def get_fsm_mode(self) -> tuple[int, int]:
+        return 0, 3
+
+    def get_balance_mode(self) -> tuple[int, int]:
+        return 7301, 0
+
+
 class FakeArmActionClient:
     def __init__(self) -> None:
         self.timeout_s: float | None = None
@@ -469,6 +477,28 @@ class UnitreeG1AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.stop_count, 0)
         self.assertEqual(state.details, {"fsm_id": 500})
         self.assertFalse(adapter.connected)
+
+    async def test_optional_loco_state_failure_does_not_block_state_read(self) -> None:
+        channel = FakeChannel()
+        client = PartialStateLocoClient()
+        adapter = self.build_adapter(channel, client)
+
+        await adapter.connect()
+        state = await adapter.get_state()
+        await adapter.close()
+
+        self.assertTrue(state.connected)
+        self.assertEqual(state.details["fsm_id"], 500)
+        self.assertEqual(state.details["fsm_mode"], 3)
+        self.assertEqual(
+            state.details["unavailable_state_fields"],
+            {
+                "balance_mode": {
+                    "status": 7301,
+                    "reason": "LocoState is not available",
+                }
+            },
+        )
 
     async def test_wave_prefers_g1_arm_action_preset(self) -> None:
         channel = FakeChannel()

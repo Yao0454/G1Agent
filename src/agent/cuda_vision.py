@@ -29,7 +29,7 @@ class CudaVisionInvoker:
         self,
         model_name: str,
         *,
-        max_new_tokens: int = 64,
+        max_new_tokens: int = 40,
         python_executable: str | None = None,
         packages_path: Path | None = None,
         worker_path: Path | None = None,

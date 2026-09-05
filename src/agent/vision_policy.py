@@ -22,24 +22,48 @@ from robot import RobotState
 from .decision import AgentDecision, DecisionAgentError
 
 DEFAULT_VISION_MODEL = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+DEFAULT_VISION_GOAL = (
+    "Respond to explicit social gestures. Prefer handshake for an extended "
+    "hand, and do not wave merely because a person is visible."
+)
+
+_CANONICAL_SKILL_NAMES = {
+    "wave_hand": "wave",
+    "shake_hand": "handshake",
+    "stop_move": "stop",
+}
+_HANDSHAKE_CONFIRMATION_DISTANCE_M = 0.5
+_HANDSHAKE_CONFIRMATION_MAX_AGE_S = 1.0
+_RECOVERED_HANDSHAKE_CONFIRMATION_MAX_AGE_S = 5.0
 
 _VISION_SYSTEM_PROMPT = """You are the real-time visual decision module for a Unitree G1.
 The supplied images are ordered frames sampled from the robot's most recent
 video window. Decide only the robot's next action now.
 
-Output exactly one JSON object with keys action, skill, arguments, speech, and
-reason. action must be execute_skill, execute_and_speak, speak, continue,
-interrupt, or ignore. Use continue while the current behavior should keep
-running. Use interrupt only when the current behavior must stop immediately.
-Use JSON null, never an empty string, for unused skill and speech fields.
+Output exactly one compact JSON object. action is required and must be
+execute_skill, execute_and_speak, speak, continue, interrupt, or ignore.
+Omit unused skill, arguments, speech, and reason fields. Use continue while the
+current behavior should keep running. Use interrupt only when the current
+behavior must stop immediately. Keep reason under four words when included.
 The skill catalog is reference documentation. Never copy catalog definitions
 into arguments. arguments contains only actual values for the one selected
 skill, for example {"arm":"right"} or {"distance_m":0.2}.
 If a person clearly extends a hand toward the robot to shake hands, select the
-handshake skill. If a person presents a raised open palm, distinguish a high
-five from a handshake using hand height and motion across the video window.
-When nothing needs a response, output exactly this shape:
-{"action":"ignore","skill":null,"arguments":{},"speech":null,"reason":"nothing actionable"}
+handshake skill immediately; do not wait for another confirmation. A handshake
+offer usually reaches toward the camera around waist or lower-chest height. A
+high five is normally a raised open palm around shoulder/head height. Use motion
+across the window when multiple frames exist, and pose/height when there is only
+one frame.
+Decision priority is safety interrupt, handshake, high five, explicit wave,
+then ignore. Merely seeing a person is not a reason to wave or speak. Select
+wave only when the person's hand is visibly waving side-to-side or they make an
+unambiguous greeting gesture. If policy_context says wave was recently selected,
+the person is already greeted; do not wave again, but still select handshake if
+they now extend a hand.
+For no response, use action ignore. For a handshake, use action execute_skill
+and skill handshake. Usually omit arguments so the registered safe defaults are
+used. Never output JSON Schema objects or keys such as type, default, const,
+minimum, or maximum inside arguments.
 Do not describe the video and do not predict far into the future. Use only the
 registered skills and their argument schemas. Keep speech brief.
 """
@@ -106,7 +130,7 @@ class TransformersVisionInvoker:
         self,
         model_name: str = DEFAULT_VISION_MODEL,
         *,
-        max_new_tokens: int = 64,
+        max_new_tokens: int = 40,
     ) -> None:
         if max_new_tokens <= 0:
             raise ValueError("max new tokens must be greater than zero")
@@ -211,9 +235,17 @@ def _skill_catalog_payload(
     skill_catalog: Sequence[RobotSkill[SkillArgs]],
 ) -> list[dict[str, object]]:
     catalog: list[dict[str, object]] = []
+    registered_names = {skill.metadata.name for skill in skill_catalog}
     for skill in skill_catalog:
+        canonical_name = _CANONICAL_SKILL_NAMES.get(skill.metadata.name)
+        if canonical_name is not None and canonical_name in registered_names:
+            continue
         schema = skill.args_model.model_json_schema()
         raw_properties = schema.get("properties", {})
+        raw_required = schema.get("required", [])
+        required_names = {
+            name for name in raw_required if isinstance(name, str)
+        } if isinstance(raw_required, list) else set()
         arguments: dict[str, object] = {}
         if isinstance(raw_properties, Mapping):
             for name, raw_descriptor in raw_properties.items():
@@ -221,24 +253,18 @@ def _skill_catalog_payload(
                     raw_descriptor, Mapping
                 ):
                     continue
-                descriptor = {
-                    key: raw_descriptor[key]
-                    for key in (
-                        "type",
-                        "default",
-                        "const",
-                        "enum",
-                        "minimum",
-                        "maximum",
-                    )
-                    if key in raw_descriptor
-                }
-                arguments[name] = descriptor
+                if "default" in raw_descriptor:
+                    arguments[name] = raw_descriptor["default"]
+                elif "const" in raw_descriptor:
+                    arguments[name] = raw_descriptor["const"]
+                elif name in required_names:
+                    arguments[name] = "<required>"
         catalog.append(
             {
                 "name": skill.metadata.name,
                 "description": skill.metadata.description,
-                "arguments": arguments,
+                "argument_defaults": arguments,
+                "required_arguments": sorted(required_names),
                 "interruptible": skill.metadata.interruptible,
             }
         )
@@ -257,6 +283,30 @@ def _recover_safe_noop(text: str) -> AgentDecision | None:
     return AgentDecision(
         action=safe_actions.pop(),
         reason="recovered safe no-op from malformed model JSON",
+    )
+
+
+def _recover_truncated_skill_decision(
+    text: str,
+    recoverable_skills: set[str],
+) -> AgentDecision | None:
+    action_match = re.search(
+        r'["\']action["\']\s*:\s*["\']execute_skill["\']',
+        text,
+    )
+    skill_match = re.search(
+        r'["\']skill["\']\s*:\s*["\']([a-zA-Z0-9_-]+)["\']',
+        text,
+    )
+    if action_match is None or skill_match is None:
+        return None
+    skill_name = skill_match.group(1)
+    if skill_name not in recoverable_skills:
+        return None
+    return AgentDecision(
+        action="execute_skill",
+        skill=skill_name,
+        reason="recovered truncated model JSON",
     )
 
 
@@ -290,7 +340,7 @@ class VisionDecisionAgent:
         model_name: str = DEFAULT_VISION_MODEL,
         invoker: VisionModelInvoker | None = None,
         timeout_s: float = 20.0,
-        goal: str = "Interact safely and helpfully with people in front of the robot.",
+        goal: str = DEFAULT_VISION_GOAL,
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("vision decision timeout must be greater than zero")
@@ -321,6 +371,8 @@ class VisionDecisionAgent:
         frames: Sequence[CameraFrame],
         robot_state: RobotState,
         skill_catalog: Sequence[RobotSkill[SkillArgs]],
+        *,
+        policy_context: Mapping[str, object] | None = None,
     ) -> AgentDecision:
         if not frames:
             return AgentDecision(action="ignore", reason="video window is empty")
@@ -340,6 +392,7 @@ class VisionDecisionAgent:
                 "connected": robot_state.connected,
                 "details": robot_state.details,
             },
+            "policy_context": dict(policy_context or {}),
             "skill_catalog": _skill_catalog_payload(skill_catalog),
         }
         prompt = (
@@ -352,7 +405,10 @@ class VisionDecisionAgent:
                     [frame.rgb for frame in frames],
                     prompt,
                 )
-            decision = self._parse_output(output)
+            decision = self._parse_output(
+                output,
+                recoverable_skills=self._recoverable_skill_names(skill_catalog),
+            )
         except TimeoutError as exc:
             raise DecisionAgentError(
                 f"Vision Decision Agent timed out after {self.timeout_s:g} seconds"
@@ -372,7 +428,28 @@ class VisionDecisionAgent:
         return decision
 
     @staticmethod
-    def _parse_output(output: object) -> AgentDecision:
+    def _recoverable_skill_names(
+        skill_catalog: Sequence[RobotSkill[SkillArgs]],
+    ) -> set[str]:
+        recoverable: set[str] = set()
+        for skill in skill_catalog:
+            tags = set(skill.metadata.tags)
+            schema = skill.args_model.model_json_schema()
+            required = schema.get("required", [])
+            if (
+                "dangerous" not in tags
+                and "operator_only" not in tags
+                and (not isinstance(required, list) or not required)
+            ):
+                recoverable.add(skill.metadata.name)
+        return recoverable
+
+    @staticmethod
+    def _parse_output(
+        output: object,
+        *,
+        recoverable_skills: set[str] | None = None,
+    ) -> AgentDecision:
         if isinstance(output, Mapping):
             candidate = output.get("structured_response", output)
             return AgentDecision.model_validate(
@@ -395,6 +472,12 @@ class VisionDecisionAgent:
                 recovered = _recover_safe_noop(text)
                 if recovered is not None:
                     return recovered
+                recovered_skill = _recover_truncated_skill_decision(
+                    text,
+                    recoverable_skills or set(),
+                )
+                if recovered_skill is not None:
+                    return recovered_skill
                 raise DecisionAgentError(
                     "Vision Decision Agent did not return a JSON object; "
                     f"raw={text[:500]!r}"
@@ -405,6 +488,12 @@ class VisionDecisionAgent:
                 recovered = _recover_safe_noop(text)
                 if recovered is not None:
                     return recovered
+                recovered_skill = _recover_truncated_skill_decision(
+                    text,
+                    recoverable_skills or set(),
+                )
+                if recovered_skill is not None:
+                    return recovered_skill
                 raise DecisionAgentError(
                     "Vision Decision Agent returned invalid JSON: "
                     f"{exc}; raw={text[:500]!r}"
@@ -426,11 +515,17 @@ class VisionPolicyOutcome:
     suppressed_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
+        decision_age_s = (
+            max(0.0, self.decided_at_s - self.window_end_s)
+            if self.window_end_s is not None
+            else None
+        )
         return {
             "decided_at_s": self.decided_at_s,
             "frame_count": self.frame_count,
             "window_start_s": self.window_start_s,
             "window_end_s": self.window_end_s,
+            "decision_age_s": decision_age_s,
             "decision": self.decision.to_dict(),
             "robot_state": {
                 "hardware": self.robot_state.hardware,
@@ -460,6 +555,7 @@ class VisionPolicyDecision:
     window_end_s: float
     decision: AgentDecision
     robot_state: RobotState
+    policy_context: Mapping[str, object] | None = None
     model_metrics: Mapping[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -468,12 +564,17 @@ class VisionPolicyDecision:
             "frame_count": self.frame_count,
             "window_start_s": self.window_start_s,
             "window_end_s": self.window_end_s,
+            "decision_age_s": max(
+                0.0,
+                self.decided_at_s - self.window_end_s,
+            ),
             "decision": self.decision.to_dict(),
             "robot_state": {
                 "hardware": self.robot_state.hardware,
                 "connected": self.robot_state.connected,
                 "details": self.robot_state.details,
             },
+            "policy_context": dict(self.policy_context or {}),
             "model_metrics": dict(self.model_metrics or {}),
         }
 
@@ -487,8 +588,9 @@ class VisionPolicyWorker:
         *,
         speech: SpeechOutput | None = None,
         interval_s: float = 0.5,
-        frame_count: int = 8,
+        frame_count: int = 1,
         action_cooldown_s: float = 5.0,
+        max_decision_age_s: float | None = None,
         queue_size: int = 16,
     ) -> None:
         if interval_s <= 0:
@@ -497,6 +599,8 @@ class VisionPolicyWorker:
             raise ValueError("vision frame count must be greater than zero")
         if action_cooldown_s < 0:
             raise ValueError("action cooldown must not be negative")
+        if max_decision_age_s is not None and max_decision_age_s <= 0:
+            raise ValueError("maximum decision age must be greater than zero")
         self.runtime = runtime
         self.decision_agent = decision_agent
         self.video_buffer = video_buffer
@@ -504,6 +608,7 @@ class VisionPolicyWorker:
         self.interval_s = interval_s
         self.frame_count = frame_count
         self.action_cooldown_s = action_cooldown_s
+        self.max_decision_age_s = max_decision_age_s
         self._decision_queue: asyncio.Queue[
             tuple[AgentDecision, tuple[CameraFrame, ...], RobotState]
         ] = asyncio.Queue(maxsize=1)
@@ -519,6 +624,11 @@ class VisionPolicyWorker:
         self._worker_tasks: tuple[asyncio.Task[None], ...] = ()
         self._active_task: asyncio.Task[tuple[SkillResult | None, bool]] | None = None
         self._active_signature: str | None = None
+        self._active_skill: str | None = None
+        self._active_required_resources: tuple[str, ...] = ()
+        self._last_selected_skill: str | None = None
+        self._last_selected_at_s: float | None = None
+        self._last_close_obstacle_at_s: float | None = None
         self._last_action_at: dict[str, float] = {}
         self._interrupt_lock = asyncio.Lock()
         self._safety_latched = False
@@ -537,6 +647,14 @@ class VisionPolicyWorker:
 
     def set_safety_latched(self, latched: bool) -> None:
         self._safety_latched = latched
+
+    def observe_frame(self, frame: CameraFrame) -> None:
+        distance_m = frame.nearest_obstacle_distance_m
+        if (
+            distance_m is not None
+            and distance_m <= _HANDSHAKE_CONFIRMATION_DISTANCE_M
+        ):
+            self._last_close_obstacle_at_s = frame.observed_at_s
 
     async def start(self) -> None:
         if self.running:
@@ -559,6 +677,8 @@ class VisionPolicyWorker:
             await asyncio.gather(active, return_exceptions=True)
         self._active_task = None
         self._active_signature = None
+        self._active_skill = None
+        self._active_required_resources = ()
 
     def drain_outcomes(self) -> tuple[VisionPolicyOutcome, ...]:
         return self._drain(self._outcome_queue)
@@ -583,6 +703,8 @@ class VisionPolicyWorker:
                 await asyncio.gather(active, return_exceptions=True)
             self._active_task = None
             self._active_signature = None
+            self._active_skill = None
+            self._active_required_resources = ()
             if had_active_behavior or force_stop:
                 try:
                     await self.runtime.robot.stop()
@@ -596,6 +718,38 @@ class VisionPolicyWorker:
                     )
             return had_active_behavior
 
+    async def stop_locomotion_for_safety(
+        self,
+        reason: str = "depth safety stop",
+    ) -> bool:
+        """Stop the mobile base without cancelling an upper-body-only action."""
+
+        async with self._interrupt_lock:
+            active = self._active_task
+            had_active_locomotion = (
+                active is not None
+                and not active.done()
+                and "mobile_base" in self._active_required_resources
+            )
+            if had_active_locomotion:
+                active.cancel()
+                await asyncio.gather(active, return_exceptions=True)
+                self._active_task = None
+                self._active_signature = None
+                self._active_skill = None
+                self._active_required_resources = ()
+            try:
+                await self.runtime.robot.stop()
+            except Exception as exc:  # noqa: BLE001 - report adapter failures upstream
+                self._put_latest(
+                    self._error_queue,
+                    VisionPolicyError(
+                        stage="interrupt",
+                        message=f"{reason}: {exc}",
+                    ),
+                )
+            return had_active_locomotion
+
     async def _policy_loop(self) -> None:
         while True:
             started = time.monotonic()
@@ -603,24 +757,55 @@ class VisionPolicyWorker:
             if frames:
                 try:
                     robot_state = await self.runtime.robot.get_state()
+                    policy_context = self._build_policy_context()
                     decision = await self.decision_agent.decide(
                         frames,
                         robot_state,
                         self.runtime.registry.list(),
+                        policy_context=policy_context,
                     )
+                    decided_at_s = time.monotonic()
                     self._put_latest(
                         self._policy_decision_queue,
                         VisionPolicyDecision(
-                            decided_at_s=time.monotonic(),
+                            decided_at_s=decided_at_s,
                             frame_count=len(frames),
                             window_start_s=frames[0].observed_at_s,
                             window_end_s=frames[-1].observed_at_s,
                             decision=decision,
                             robot_state=robot_state,
+                            policy_context=policy_context,
                             model_metrics=self.decision_agent.last_metrics,
                         ),
                     )
-                    if decision.action == "interrupt":
+                    decision_age_s = max(
+                        0.0,
+                        decided_at_s - frames[-1].observed_at_s,
+                    )
+                    if (
+                        self.max_decision_age_s is not None
+                        and decision.action
+                        in {"execute_skill", "execute_and_speak", "speak"}
+                        and decision_age_s > self.max_decision_age_s
+                        and not self._stale_handshake_has_fresh_confirmation(
+                            decision,
+                            decided_at_s=decided_at_s,
+                        )
+                    ):
+                        self._put_latest(
+                            self._outcome_queue,
+                            self._outcome(
+                                decision,
+                                frames,
+                                robot_state,
+                                suppressed_reason=(
+                                    "stale visual decision: "
+                                    f"{decision_age_s:.2f}s old exceeds "
+                                    f"{self.max_decision_age_s:.2f}s limit"
+                                ),
+                            ),
+                        )
+                    elif decision.action == "interrupt":
                         interrupted = await self.interrupt("vision policy")
                         self._put_latest(
                             self._outcome_queue,
@@ -662,6 +847,8 @@ class VisionPolicyWorker:
                 if (
                     self._safety_latched
                     and decision.action in {"execute_skill", "execute_and_speak"}
+                    and self._decision_uses_mobile_base(decision)
+                    and decision.skill not in {"stop", "stop_move"}
                 ):
                     self._put_latest(
                         self._outcome_queue,
@@ -669,7 +856,24 @@ class VisionPolicyWorker:
                             decision,
                             frames,
                             robot_state,
-                            suppressed_reason="depth safety latch is active",
+                            suppressed_reason=(
+                                "depth safety latch blocks mobile-base skills"
+                            ),
+                        ),
+                    )
+                    continue
+
+                if self._recovered_handshake_lacks_recent_proximity(decision):
+                    self._put_latest(
+                        self._outcome_queue,
+                        self._outcome(
+                            decision,
+                            frames,
+                            robot_state,
+                            suppressed_reason=(
+                                "recovered handshake lacks recent close-range "
+                                "depth evidence"
+                            ),
                         ),
                     )
                     continue
@@ -706,6 +910,15 @@ class VisionPolicyWorker:
                     await self.interrupt("switching vision behavior")
 
                 self._active_signature = signature
+                self._active_skill = decision.skill
+                self._active_required_resources = self._decision_required_resources(
+                    decision
+                )
+                if decision.skill is not None:
+                    self._last_selected_skill = self._canonical_skill_name(
+                        decision.skill
+                    )
+                    self._last_selected_at_s = now
                 self._last_action_at[signature] = now
                 self._active_task = asyncio.create_task(
                     self._execute(decision),
@@ -714,10 +927,14 @@ class VisionPolicyWorker:
                 try:
                     skill_result, speech_spoken = await self._active_task
                 except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
                     continue
                 finally:
                     self._active_task = None
                     self._active_signature = None
+                    self._active_skill = None
+                    self._active_required_resources = ()
                 self._put_latest(
                     self._outcome_queue,
                     self._outcome(
@@ -732,6 +949,8 @@ class VisionPolicyWorker:
             except Exception as exc:  # noqa: BLE001 - execution worker must survive
                 self._active_task = None
                 self._active_signature = None
+                self._active_skill = None
+                self._active_required_resources = ()
                 self._put_latest(
                     self._error_queue,
                     VisionPolicyError(stage="execution", message=str(exc)),
@@ -755,12 +974,92 @@ class VisionPolicyWorker:
                 speech_spoken = True
         return skill_result, speech_spoken
 
+    def _decision_required_resources(
+        self,
+        decision: AgentDecision,
+    ) -> tuple[str, ...]:
+        if decision.skill is None:
+            return ()
+        try:
+            return self.runtime.registry.get(
+                decision.skill
+            ).metadata.required_resources
+        except KeyError:
+            return ()
+
+    def _decision_uses_mobile_base(self, decision: AgentDecision) -> bool:
+        return "mobile_base" in self._decision_required_resources(decision)
+
+    def _build_policy_context(self) -> dict[str, object]:
+        context: dict[str, object] = {
+            "active_skill": self._active_skill,
+            "last_selected_skill": self._last_selected_skill,
+            "safety_latched": self._safety_latched,
+        }
+        if self._last_selected_at_s is not None:
+            context["seconds_since_last_selection"] = round(
+                max(0.0, time.monotonic() - self._last_selected_at_s),
+                3,
+            )
+        if self._last_close_obstacle_at_s is not None:
+            context["seconds_since_close_obstacle"] = round(
+                max(0.0, time.monotonic() - self._last_close_obstacle_at_s),
+                3,
+            )
+        return context
+
+    def _recovered_handshake_lacks_recent_proximity(
+        self,
+        decision: AgentDecision,
+    ) -> bool:
+        if (
+            self._canonical_skill_name(decision.skill or "") != "handshake"
+            or decision.reason != "recovered truncated model JSON"
+        ):
+            return False
+        return not self._has_recent_close_obstacle(
+            now_s=time.monotonic(),
+            max_age_s=_RECOVERED_HANDSHAKE_CONFIRMATION_MAX_AGE_S,
+        )
+
+    def _stale_handshake_has_fresh_confirmation(
+        self,
+        decision: AgentDecision,
+        *,
+        decided_at_s: float,
+    ) -> bool:
+        if self._canonical_skill_name(decision.skill or "") != "handshake":
+            return False
+        return self._has_recent_close_obstacle(
+            now_s=decided_at_s,
+            max_age_s=_HANDSHAKE_CONFIRMATION_MAX_AGE_S,
+        )
+
+    def _has_recent_close_obstacle(
+        self,
+        *,
+        now_s: float,
+        max_age_s: float,
+    ) -> bool:
+        if self._last_close_obstacle_at_s is None:
+            return False
+        age_s = max(0.0, now_s - self._last_close_obstacle_at_s)
+        return age_s <= max_age_s
+
+    @staticmethod
+    def _canonical_skill_name(skill_name: str) -> str:
+        return _CANONICAL_SKILL_NAMES.get(skill_name, skill_name)
+
     @staticmethod
     def _decision_signature(decision: AgentDecision) -> str:
         return json.dumps(
             {
                 "action": decision.action,
-                "skill": decision.skill,
+                "skill": (
+                    VisionPolicyWorker._canonical_skill_name(decision.skill)
+                    if decision.skill is not None
+                    else None
+                ),
                 "arguments": decision.arguments,
                 "speech": decision.speech,
             },

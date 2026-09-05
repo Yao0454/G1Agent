@@ -12,6 +12,7 @@ from .decision import (
 )
 from .service import AgentError, AgentInvoker, RobotAgent
 from .vision_policy import (
+    DEFAULT_VISION_GOAL,
     DEFAULT_VISION_MODEL,
     OllamaVisionInvoker,
     TransformersVisionInvoker,
@@ -24,6 +25,7 @@ from .vision_policy import (
 )
 
 __all__ = [
+    "DEFAULT_VISION_GOAL",
     "DEFAULT_VISION_MODEL",
     "AgentDecision",
     "AgentError",

@@ -19,7 +19,10 @@ class WaveArgs(SkillArgs):
 class WaveSkill(RobotSkill[WaveArgs]):
     metadata = SkillMetadata(
         name="wave",
-        description="Wave the robot's right hand as a social gesture.",
+        description=(
+            "Wave only in response to a visibly waving or explicit greeting "
+            "gesture; never use for a forward extended handshake offer."
+        ),
         tags=("gesture", "social"),
         required_resources=("upper_body",),
         # The G1 action RPC can consume its 10 s client timeout before
@@ -80,3 +83,18 @@ class WaveSkill(RobotSkill[WaveArgs]):
         result.data["completion_verified"] = True
         result.verification = details
         return result
+
+
+class WaveHandSkill(WaveSkill):
+    """Compatibility alias matching the SDK's ``WaveHand`` name."""
+
+    metadata = SkillMetadata(
+        name="wave_hand",
+        description="Run the SDK wave-hand action.",
+        tags=("gesture", "social", "sdk_loco"),
+        required_resources=("upper_body",),
+        timeout_s=20.0,
+    )
+
+
+__all__ = ["WAVE_VERIFICATION_TIMEOUT_S", "WaveArgs", "WaveHandSkill", "WaveSkill"]

@@ -139,6 +139,7 @@ class PresetArmActionSkill(RobotSkill[ArmActionArgs]):
         ctx.runtime_data["arm_action_interrupted"] = (
             "interrupting_action_id" in verification.details
         )
+        ctx.runtime_data["arm_action_completion_verified"] = verification.completed
         return apply_arm_action_verification(
             result,
             verification.message,
@@ -152,9 +153,11 @@ class PresetArmActionSkill(RobotSkill[ArmActionArgs]):
     async def cleanup(self, ctx: SkillContext, args: ArmActionArgs) -> None:
         if ctx.runtime_data.get("arm_action_started") is not True:
             return
-        if ctx.runtime_data.get("arm_action_verification_returned") is True:
-            return
-        if ctx.runtime_data.get("arm_action_interrupted") is True:
+        if (
+            ctx.runtime_data.get("arm_action_verification_returned") is True
+            and ctx.runtime_data.get("arm_action_interrupted") is not True
+            and ctx.runtime_data.get("arm_action_completion_verified") is True
+        ):
             return
         await ctx.robot.release_arm()
 
@@ -166,7 +169,10 @@ class HandshakeArgs(SkillArgs):
 class HandshakeSkill(RobotSkill[HandshakeArgs]):
     metadata = SkillMetadata(
         name="handshake",
-        description="Shake an offered human hand, then release it.",
+        description=(
+            "Highest-priority response when a person extends a hand toward the "
+            "robot around waist or lower-chest height; shake it, then release."
+        ),
         tags=("gesture", "social", "sdk_preset"),
         required_resources=("upper_body",),
         timeout_s=30.0,
@@ -227,6 +233,18 @@ class HandshakeSkill(RobotSkill[HandshakeArgs]):
             await ctx.robot.release_arm()
 
 
+class ShakeHandSkill(HandshakeSkill):
+    """Compatibility alias matching the SDK's ``ShakeHand`` name."""
+
+    metadata = SkillMetadata(
+        name="shake_hand",
+        description="Run the SDK handshake sequence and release the arm.",
+        tags=("gesture", "social", "sdk_loco"),
+        required_resources=("upper_body",),
+        timeout_s=30.0,
+    )
+
+
 class ReleaseArmSkill(RobotSkill[ArmActionArgs]):
     metadata = SkillMetadata(
         name="release_arm",
@@ -275,6 +293,7 @@ __all__ = [
     "HandshakeSkill",
     "PresetArmActionSkill",
     "ReleaseArmSkill",
+    "ShakeHandSkill",
     "apply_arm_action_verification",
     "build_preset_arm_action_skills",
     "check_arm_action_preconditions",

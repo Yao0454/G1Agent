@@ -24,6 +24,13 @@ class StopArgs(SkillArgs):
     pass
 
 
+class MoveArgs(SkillArgs):
+    forward_m_s: float = Field(default=0.1, ge=-0.3, le=0.3)
+    lateral_m_s: float = Field(default=0.0, ge=-0.3, le=0.3)
+    yaw_rad_s: float = Field(default=0.0, ge=-0.6, le=0.6)
+    duration_s: float = Field(default=0.5, ge=0.1, le=2.0)
+
+
 class _BoundedMotionSkill[ArgsT: SkillArgs](RobotSkill[ArgsT]):
     async def check_preconditions(
         self,
@@ -155,6 +162,37 @@ class TurnRightSkill(_TurnSkill):
     result_label = "right turn"
 
 
+class MoveSkill(_BoundedMotionSkill[MoveArgs]):
+    """Direct bounded wrapper for the SDK's generic ``LocoClient.move`` API."""
+
+    metadata = SkillMetadata(
+        name="move",
+        description="Move with bounded forward, lateral, and yaw velocities, then stop.",
+        tags=("motion", "sdk_loco"),
+        required_resources=("mobile_base",),
+        timeout_s=6.0,
+    )
+    args_model = MoveArgs
+
+    async def execute(self, ctx: SkillContext, args: MoveArgs) -> SkillResult:
+        ctx.runtime_data["motion_attempted"] = True
+        await ctx.robot.move_velocity(
+            args.forward_m_s,
+            args.lateral_m_s,
+            args.yaw_rad_s,
+        )
+        await asyncio.sleep(args.duration_s)
+        await ctx.robot.stop()
+        ctx.runtime_data["motion_stopped"] = True
+        return SkillResult.ok(
+            "generic bounded movement completed",
+            forward_m_s=args.forward_m_s,
+            lateral_m_s=args.lateral_m_s,
+            yaw_rad_s=args.yaw_rad_s,
+            duration_s=args.duration_s,
+        )
+
+
 class StopSkill(RobotSkill[StopArgs]):
     metadata = SkillMetadata(
         name="stop",
@@ -172,12 +210,33 @@ class StopSkill(RobotSkill[StopArgs]):
         return SkillResult.ok("robot software stop commands accepted")
 
 
+class StopMoveSkill(RobotSkill[StopArgs]):
+    """Compatibility skill matching the SDK's ``StopMove`` call."""
+
+    metadata = SkillMetadata(
+        name="stop_move",
+        description="Stop the G1 locomotion controller.",
+        tags=("motion", "safety", "sdk_loco"),
+        required_resources=("mobile_base",),
+        timeout_s=12.0,
+        interruptible=False,
+    )
+    args_model = StopArgs
+
+    async def execute(self, ctx: SkillContext, args: StopArgs) -> SkillResult:
+        await ctx.robot.stop()
+        return SkillResult.ok("stop_move command accepted")
+
+
 __all__ = [
     "LinearMoveArgs",
+    "MoveArgs",
     "MoveForwardSkill",
     "MoveLeftSkill",
     "MoveRightSkill",
+    "MoveSkill",
     "StopArgs",
+    "StopMoveSkill",
     "StopSkill",
     "TurnArgs",
     "TurnLeftSkill",

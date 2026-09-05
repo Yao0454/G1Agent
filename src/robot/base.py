@@ -45,6 +45,10 @@ class RobotAdapter(Protocol):
         action_name: str,
     ) -> None: ...
 
+    async def execute_custom_arm_action(self, action_name: str) -> None: ...
+
+    async def stop_custom_arm_action(self) -> None: ...
+
     async def wait_for_arm_action_completion(
         self,
         action_id: int,

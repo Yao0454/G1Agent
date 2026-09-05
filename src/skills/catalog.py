@@ -12,10 +12,14 @@ from .motions import (
     MoveForwardSkill,
     MoveLeftSkill,
     MoveRightSkill,
+    MoveSkill,
     ReleaseArmSkill,
+    ShakeHandSkill,
+    StopMoveSkill,
     StopSkill,
     TurnLeftSkill,
     TurnRightSkill,
+    WaveHandSkill,
     WaveSkill,
     build_operator_control_skills,
     build_preset_arm_action_skills,
@@ -26,7 +30,9 @@ from .posture import build_posture_skills
 def build_g1_autonomy_skills() -> tuple[RobotSkill[SkillArgs], ...]:
     skills = (
         WaveSkill(),
+        WaveHandSkill(),
         HandshakeSkill(),
+        ShakeHandSkill(),
         *build_preset_arm_action_skills(),
         ReleaseArmSkill(),
         *build_posture_skills(operator_only=False),
@@ -37,6 +43,8 @@ def build_g1_autonomy_skills() -> tuple[RobotSkill[SkillArgs], ...]:
         TurnLeftSkill(),
         TurnRightSkill(),
         StopSkill(),
+        StopMoveSkill(),
+        MoveSkill(),
     )
     return cast(tuple[RobotSkill[SkillArgs], ...], skills)
 
@@ -49,19 +57,26 @@ def build_g1_operator_skills() -> tuple[RobotSkill[SkillArgs], ...]:
     return cast(tuple[RobotSkill[SkillArgs], ...], skills)
 
 
+def build_g1_all_skills() -> tuple[RobotSkill[SkillArgs], ...]:
+    """Return the complete SDK-backed catalog, including operator controls."""
+
+    return build_g1_autonomy_skills() + build_g1_operator_skills()
+
+
 def register_g1_skills(
     runtime: SkillRuntime,
     *,
     include_operator_only: bool = False,
 ) -> None:
-    skills = list(build_g1_autonomy_skills())
-    if include_operator_only:
-        skills.extend(build_g1_operator_skills())
+    skills = list(
+        build_g1_all_skills() if include_operator_only else build_g1_autonomy_skills()
+    )
     for skill in skills:
         runtime.register(skill)
 
 
 __all__ = [
+    "build_g1_all_skills",
     "build_g1_autonomy_skills",
     "build_g1_operator_skills",
     "register_g1_skills",

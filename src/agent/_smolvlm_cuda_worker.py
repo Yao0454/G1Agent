@@ -18,7 +18,7 @@ signal.signal(signal.SIGINT, signal.SIG_IGN)
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
-    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--max-new-tokens", type=int, default=40)
     return parser.parse_args()
 
 
@@ -80,6 +80,7 @@ class CudaModel:
         }
 
     def invoke(self, encoded_frames, prompt):
+        preprocess_started = time.monotonic()
         images = []
         for encoded in encoded_frames:
             image = self.image_class.open(
@@ -95,6 +96,8 @@ class CudaModel:
         inputs["pixel_values"] = inputs["pixel_values"].to(
             dtype=self.torch.float16
         )
+        self.torch.cuda.synchronize()
+        preprocess_s = time.monotonic() - preprocess_started
         started = time.monotonic()
         with self.torch.inference_mode():
             generated = self.model.generate(
@@ -104,6 +107,7 @@ class CudaModel:
             )
         self.torch.cuda.synchronize()
         input_length = inputs["input_ids"].shape[1]
+        generated_tokens = generated.shape[1] - input_length
         output = self.processor.batch_decode(
             generated[:, input_length:],
             skip_special_tokens=True,
@@ -111,8 +115,11 @@ class CudaModel:
         if not output:
             raise RuntimeError("SmolVLM2 returned no text")
         return output[0].strip(), {
+            "preprocess_s": round(preprocess_s, 3),
             "inference_s": round(time.monotonic() - started, 3),
             "frame_count": len(images),
+            "input_tokens": int(input_length),
+            "generated_tokens": int(generated_tokens),
             "peak_mb": round(
                 self.torch.cuda.max_memory_allocated() / 1048576,
                 1,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import unittest
 from collections.abc import Sequence
 
@@ -11,20 +12,21 @@ from agent import (
     VisionPolicyDecision,
     VisionPolicyWorker,
 )
+from agent.vision_policy import _skill_catalog_payload
 from core.runtime import SkillRuntime
 from perception import CameraFrame, PerceptionResult, VideoBuffer
 from robot import RobotState, SimulatedRobotAdapter
-from skills.motions import MoveBackwardSkill, WaveSkill
+from skills.motions import HandshakeSkill, MoveBackwardSkill, WaveHandSkill, WaveSkill
 
 
-def camera_frame(at_s: float) -> CameraFrame:
+def camera_frame(at_s: float, *, obstacle_distance_m: float = 2.0) -> CameraFrame:
     observation = PerceptionResult(observed_at_s=at_s, source="camera:test")
     return CameraFrame(
         observed_at_s=at_s,
         rgb=b"jpeg",
         depth=None,
         observation=observation,
-        nearest_obstacle_distance_m=2.0,
+        nearest_obstacle_distance_m=obstacle_distance_m,
     )
 
 
@@ -77,18 +79,25 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
         )
         runtime = SkillRuntime(SimulatedRobotAdapter())
         runtime.register(WaveSkill())
+        runtime.register(WaveHandSkill())
         agent = VisionDecisionAgent(invoker=invoker)
 
         decision = await agent.decide(
             [camera_frame(1.0), camera_frame(2.0)],
             RobotState(hardware=False, connected=True),
             runtime.registry.list(),
+            policy_context={
+                "last_selected_skill": "wave",
+                "seconds_since_last_selection": 3.0,
+            },
         )
 
         self.assertEqual(decision.skill, "wave")
         self.assertEqual(len(invoker.calls[0][0]), 2)
         self.assertIn('"frame_count": 2', invoker.calls[0][1])
         self.assertIn('"name": "wave"', invoker.calls[0][1])
+        self.assertNotIn('"name": "wave_hand"', invoker.calls[0][1])
+        self.assertIn('"last_selected_skill": "wave"', invoker.calls[0][1])
 
     async def test_continue_and_interrupt_are_valid_noop_decisions(self) -> None:
         for action in ("continue", "interrupt"):
@@ -103,6 +112,7 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
             window_end_s=2.0,
             decision=AgentDecision(action="ignore"),
             robot_state=RobotState(hardware=False, connected=True),
+            policy_context={"last_selected_skill": "wave"},
             model_metrics={"inference_s": 0.25},
         ).to_dict()
 
@@ -113,6 +123,28 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
             AgentDecision(action="ignore").to_dict(),
         )
         self.assertEqual(payload["model_metrics"], {"inference_s": 0.25})
+        self.assertEqual(
+            payload["policy_context"],
+            {"last_selected_skill": "wave"},
+        )
+        self.assertEqual(payload["decision_age_s"], 1.0)
+
+    def test_compatibility_aliases_share_action_signature(self) -> None:
+        wave = AgentDecision(
+            action="execute_skill",
+            skill="wave",
+            arguments={"arm": "right"},
+        )
+        wave_hand = AgentDecision(
+            action="execute_skill",
+            skill="wave_hand",
+            arguments={"arm": "right"},
+        )
+
+        self.assertEqual(
+            VisionPolicyWorker._decision_signature(wave),
+            VisionPolicyWorker._decision_signature(wave_hand),
+        )
 
     async def test_malformed_ignore_is_recovered_as_safe_noop(self) -> None:
         decision = VisionDecisionAgent._parse_output(
@@ -127,6 +159,45 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
             VisionDecisionAgent._parse_output(
                 '{"action":"execute_skill","skill":"wave"'
             )
+
+    async def test_truncated_handshake_is_recovered_for_safe_default_skill(
+        self,
+    ) -> None:
+        decision = VisionDecisionAgent._parse_output(
+            '{\n    "action": "execute_skill",\n'
+            '    "skill": "handshake",\n'
+            '    "arguments": {"arm": {"type": "string", "default":',
+            recoverable_skills={"handshake"},
+        )
+
+        self.assertEqual(decision.action, "execute_skill")
+        self.assertEqual(decision.skill, "handshake")
+        self.assertEqual(decision.arguments, {})
+        self.assertEqual(decision.reason, "recovered truncated model JSON")
+
+    async def test_truncated_skill_is_rejected_without_recovery_allowlist(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(Exception, "JSON object"):
+            VisionDecisionAgent._parse_output(
+                '{"action":"execute_skill","skill":"handshake","arguments":'
+            )
+
+    async def test_skill_catalog_uses_values_instead_of_json_schema(self) -> None:
+        payload = _skill_catalog_payload([HandshakeSkill()])
+
+        self.assertEqual(
+            payload,
+            [
+                {
+                    "name": "handshake",
+                    "description": HandshakeSkill.metadata.description,
+                    "argument_defaults": {"duration_s": 4.0},
+                    "required_arguments": [],
+                    "interruptible": True,
+                }
+            ],
+        )
 
     async def test_noisy_json_noop_discards_hallucinated_arguments(self) -> None:
         decision = VisionDecisionAgent._parse_output(
@@ -174,7 +245,186 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_depth_safety_latch_blocks_skill_execution(self) -> None:
+    async def test_recovered_handshake_requires_recent_close_depth(self) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(HandshakeSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        buffer.push(camera_frame(time.monotonic()))
+        invoker = FakeVisionInvoker(
+            ['{"action":"execute_skill","skill":"handshake","arguments":']
+        )
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=invoker),
+            buffer,
+            interval_s=0.01,
+        )
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.04)
+        finally:
+            await worker.stop()
+
+        self.assertNotIn("arm_action", [event[0] for event in robot.events])
+        self.assertTrue(
+            any(
+                outcome.suppressed_reason
+                == "recovered handshake lacks recent close-range depth evidence"
+                for outcome in worker.drain_outcomes()
+            )
+        )
+
+    async def test_recent_close_depth_allows_recovered_handshake(self) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(HandshakeSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        frame = camera_frame(
+            time.monotonic(),
+            obstacle_distance_m=0.35,
+        )
+        buffer.push(frame)
+        invoker = FakeVisionInvoker(
+            [
+                '{"action":"execute_skill","skill":"handshake","arguments":',
+                '{"action":"continue"}',
+            ]
+        )
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=invoker),
+            buffer,
+            interval_s=0.01,
+        )
+        worker.observe_frame(frame)
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.04)
+        finally:
+            await worker.stop()
+
+        self.assertIn("arm_action", [event[0] for event in robot.events])
+
+    async def test_stale_visual_action_is_not_executed(self) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(WaveSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        buffer.push(camera_frame(time.monotonic() - 10.0))
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "action": "execute_skill",
+                    "skill": "wave",
+                    "arguments": {"arm": "right"},
+                }
+            ]
+        )
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=invoker),
+            buffer,
+            interval_s=0.01,
+            max_decision_age_s=5.0,
+        )
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.04)
+        finally:
+            await worker.stop()
+
+        self.assertNotIn(("wave", "right"), robot.events)
+        self.assertTrue(
+            any(
+                outcome.suppressed_reason is not None
+                and "stale visual decision" in outcome.suppressed_reason
+                for outcome in worker.drain_outcomes()
+            )
+        )
+
+    async def test_stale_handshake_is_revalidated_by_fresh_close_depth(
+        self,
+    ) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(HandshakeSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        buffer.push(camera_frame(time.monotonic() - 10.0))
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "action": "execute_skill",
+                    "skill": "handshake",
+                    "arguments": {},
+                },
+                {"action": "continue"},
+            ]
+        )
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=invoker),
+            buffer,
+            interval_s=0.01,
+            max_decision_age_s=5.0,
+        )
+        worker.observe_frame(
+            camera_frame(
+                time.monotonic(),
+                obstacle_distance_m=0.35,
+            )
+        )
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.04)
+        finally:
+            await worker.stop()
+
+        self.assertIn("arm_action", [event[0] for event in robot.events])
+
+    async def test_depth_safety_latch_blocks_mobile_base_skill(self) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(MoveBackwardSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        buffer.push(camera_frame(1.0))
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "action": "execute_skill",
+                    "skill": "move_backward",
+                    "arguments": {"distance_m": 0.2},
+                }
+            ]
+        )
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=invoker),
+            buffer,
+            interval_s=0.01,
+        )
+        worker.set_safety_latched(True)
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.04)
+        finally:
+            await worker.stop()
+
+        self.assertNotIn("move_velocity", [event[0] for event in robot.events])
+        self.assertTrue(
+            any(
+                outcome.suppressed_reason
+                == "depth safety latch blocks mobile-base skills"
+                for outcome in worker.drain_outcomes()
+            )
+        )
+
+    async def test_depth_safety_latch_allows_upper_body_skill(self) -> None:
         robot = SimulatedRobotAdapter()
         runtime = SkillRuntime(robot)
         runtime.register(WaveSkill())
@@ -203,13 +453,78 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop()
 
-        self.assertNotIn(("wave", "right"), robot.events)
-        self.assertTrue(
-            any(
-                outcome.suppressed_reason == "depth safety latch is active"
-                for outcome in worker.drain_outcomes()
-            )
+        self.assertIn(("wave", "right"), robot.events)
+
+    async def test_depth_safety_stop_preserves_active_handshake(self) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(HandshakeSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        buffer.push(camera_frame(1.0))
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "action": "execute_skill",
+                    "skill": "handshake",
+                    "arguments": {"duration_s": 1.0},
+                },
+                {"action": "continue"},
+            ]
         )
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=invoker),
+            buffer,
+            interval_s=0.01,
+        )
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.04)
+            interrupted = await worker.stop_locomotion_for_safety()
+            self.assertFalse(interrupted)
+            self.assertIsNotNone(worker.active_behavior)
+            self.assertNotIn(("release_arm", None), robot.events)
+        finally:
+            await worker.stop()
+
+        self.assertIn(("stop", None), robot.events)
+        self.assertIn(("release_arm", None), robot.events)
+
+    async def test_depth_safety_stop_cancels_active_locomotion(self) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(MoveBackwardSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        buffer.push(camera_frame(1.0))
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "action": "execute_skill",
+                    "skill": "move_backward",
+                    "arguments": {"distance_m": 0.3},
+                },
+                {"action": "continue"},
+            ]
+        )
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=invoker),
+            buffer,
+            interval_s=0.01,
+        )
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.04)
+            interrupted = await worker.stop_locomotion_for_safety()
+            self.assertTrue(interrupted)
+            self.assertIsNone(worker.active_behavior)
+        finally:
+            await worker.stop()
+
+        self.assertIn("move_velocity", [event[0] for event in robot.events])
+        self.assertIn(("stop", None), robot.events)
 
     async def test_identical_skill_is_suppressed_during_cooldown(self) -> None:
         robot = SimulatedRobotAdapter()

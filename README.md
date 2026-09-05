@@ -224,15 +224,20 @@ CUDA VLM，不会连接或驱动实体 G1：
 .venv/bin/python -m app.perception --no-audio
 ```
 
-上面默认等价于 `--policy vision --vision-backend cuda --vision-frame-count 8`。
-当前设备的真实 8 帧测量约为 9.9 秒/次、峰值显存约 1.9 GB，因此达不到 2 Hz；
-`--vision-interval-s 0.5` 只是最短调度间隔。需要更快试跑时可减少输入帧数：
+上面默认等价于 `--policy vision --vision-backend cuda --vision-frame-count 1`。
+当前设备的真实 8 帧测量约为 9–12 秒/次、峰值显存约 1.9 GB，因此无法用于
+实时动作响应；2 帧实测仍约为 5.5–7.5 秒。`--vision-interval-s 0.5` 只是最短
+调度间隔，因此当前硬件默认使用最新单帧，并拒绝执行基于超过 5 秒旧画面的动作：
 
 ```bash
 .venv/bin/python -m app.perception \
   --no-audio \
   --vision-frame-count 1
 ```
+
+需要保留两帧时可显式传 `--vision-frame-count 2`，但不适合低延迟握手响应。
+深度安全锁只停止和阻止使用 `mobile_base` 的移动/姿态动作；`handshake`、`wave`
+等仅使用 `upper_body` 的原地动作不会因为人手伸入 0.4 m 安全区而被取消。
 
 完成现场安全检查后，才显式增加真机参数：
 
@@ -313,6 +318,44 @@ uv run --extra perception g1-perception \
 
 Decision Agent 的技能目录由当前 `SkillRegistry` 动态生成，新增 Skill 后不需要再
 维护另一份硬编码的技能白名单；每个动作的参数仍由对应 Skill 的 `SkillArgs` 校验。
+
+当前 G1 动作 Skill 由 `skills.register_g1_skills()` 统一注册。安全自治目录包括：
+
+```text
+手臂预设：wave / wave_hand / handshake / shake_hand / two_hand_kiss / left_kiss /
+right_kiss / hands_up / clap / high_five / hug / heart / right_heart / reject /
+right_hand_up / x_ray / high_wave / release_arm
+姿态：squat / sit / stand_up / high_stand / low_stand / balance_stand
+移动：move / move_forward / move_backward / move_left / move_right /
+turn_left / turn_right / stop / stop_move
+```
+
+SDK 里同样存在但不默认暴露给视觉模型的 operator-only Skill 为：
+`start`、`damp`、`zero_torque`、`wave_with_turn`、`continuous_gait`、
+`switch_move_mode`、`set_speed_mode`、`set_fsm_id`、`set_balance_mode`、
+`set_swing_height`、`set_stand_height`、`set_velocity`、`set_task_id`、
+`move_sdk`、
+`switch_to_user_ctrl`、`switch_to_internal_ctrl`、`fsm_api`、
+`execute_custom_arm_action`、`stop_custom_arm_action`。通过
+`register_g1_skills(runtime, include_operator_only=True)` 才会加入这些控制；
+如果需要拿到完整目录而不注册，可调用 `build_g1_all_skills()`。
+命令行显式加载完整目录时增加 `--include-operator-only-skills`。例如：
+
+```bash
+.venv/bin/python -m app.perception \
+  --hardware --network eth0 --no-audio \
+  --include-operator-only-skills
+```
+
+这个开关会把危险控制也加入模型可见目录，只用于人工监管测试；正常视觉自治不要加。
+其中 `damp`、`zero_torque`、显式 FSM/任务 ID、控制模式切换、原始 `fsm_api` 和
+自定义手臂动作会改变控制状态，不能让 VLM 自主选择。`set_velocity` 也只在
+operator-only 目录中提供；默认视觉目录使用带硬限幅和软件 stop 的
+`move`/方向移动 Skills。
+SDK 头文件把 `left kiss` 与 `right kiss` 都映射为动作 ID `12`，代码保持这个
+真实映射而不是伪造两个不同的底层动作。`handshake` 优先使用 arm preset ID `27`，
+没有 `G1ArmActionClient` 时回退到 SDK 示例的 `shake_hand(0)`，持续有限时间后用
+`shake_hand(1)` 释放。
 
 `wave` 使用 G1 `G1ArmActionClient` 的内置 `face wave`（动作 ID `25`）；如果当前
 bindings 没有该客户端，则回退到 `LocoClient.wave_hand()`。内置手臂动作只支持

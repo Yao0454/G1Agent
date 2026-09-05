@@ -42,6 +42,12 @@ class SimulatedRobotAdapter:
             )
         )
 
+    async def execute_custom_arm_action(self, action_name: str) -> None:
+        self.events.append(("custom_arm_action", action_name))
+
+    async def stop_custom_arm_action(self) -> None:
+        self.events.append(("stop_custom_arm_action", None))
+
     async def wait_for_arm_action_completion(
         self,
         action_id: int,

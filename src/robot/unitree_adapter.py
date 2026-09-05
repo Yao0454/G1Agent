@@ -19,6 +19,7 @@ from .g1_actions import G1_ARM_ACTION_NAMES
 logger = logging.getLogger(__name__)
 
 _ARM_ACTION_FEEDBACK_PROBE_S = 1.0
+_LOCO_STATE_NOT_AVAILABLE_STATUS = 7301
 
 
 class ChannelApi(Protocol):
@@ -37,6 +38,30 @@ class G1LocoClientApi(Protocol):
     def get_fsm_mode(self) -> tuple[int, int]: ...
 
     def get_balance_mode(self) -> tuple[int, int]: ...
+
+    def set_fsm_id(self, fsm_id: int) -> int: ...
+
+    def set_balance_mode(self, balance_mode: int) -> int: ...
+
+    def set_swing_height(self, swing_height: float) -> int: ...
+
+    def set_stand_height(self, stand_height: float) -> int: ...
+
+    def set_velocity(
+        self,
+        vx: float,
+        vy: float,
+        omega: float,
+        duration: float = 1.0,
+    ) -> int: ...
+
+    def set_task_id(self, task_id: int) -> int: ...
+
+    def switch_to_user_ctrl(self) -> int: ...
+
+    def switch_to_internal_ctrl(self, mode: object) -> int: ...
+
+    def _fsm_api(self, parameter: str) -> tuple[int, str] | int: ...
 
     def damp(self) -> int: ...
 
@@ -82,7 +107,9 @@ class G1ArmActionClientApi(Protocol):
 
     def init(self) -> None: ...
 
-    def execute_action(self, action_id: int) -> int: ...
+    def execute_action(self, action_id: int | str) -> int: ...
+
+    def stop_custom_action(self) -> int: ...
 
 
 class ArmActionMonitorApi(Protocol):
@@ -241,6 +268,22 @@ class UnitreeG1Adapter:
                 lambda: self._execute_arm_action_sync(action_id, action_name),
             )
 
+    async def execute_custom_arm_action(self, action_name: str) -> None:
+        if not action_name.strip():
+            raise ValueError("custom arm action name must not be empty")
+        async with self._lock:
+            await self._run_native(
+                action_name,
+                lambda: self._execute_custom_arm_action_sync(action_name),
+            )
+
+    async def stop_custom_arm_action(self) -> None:
+        async with self._lock:
+            await self._run_native(
+                "stop custom arm action",
+                self._stop_custom_arm_action_sync,
+            )
+
     async def wait_for_arm_action_completion(
         self,
         action_id: int,
@@ -389,6 +432,7 @@ class UnitreeG1Adapter:
             status, fsm_id = client.get_fsm_id()
             self._require_success("get_fsm_id", status)
             details: dict[str, object] = {"fsm_id": fsm_id}
+            unavailable_fields: dict[str, dict[str, object]] = {}
             for key, method_name in (
                 ("fsm_mode", "get_fsm_mode"),
                 ("balance_mode", "get_balance_mode"),
@@ -397,9 +441,18 @@ class UnitreeG1Adapter:
                 if not callable(method):
                     continue
                 value_status, value = method()
-                self._require_success(method_name, value_status)
+                if value_status != 0:
+                    unavailable_fields[key] = {
+                        "status": value_status,
+                        "reason": self._sdk_status_detail(value_status)
+                        or f"{method_name} query failed",
+                    }
+                    continue
                 details[key] = value
-            details["arm_action_presets"] = self._arm_action is not None
+            if unavailable_fields:
+                details["unavailable_state_fields"] = unavailable_fields
+            if self._arm_action is not None:
+                details["arm_action_presets"] = True
             return details
 
     def _stop_sync(self) -> None:
@@ -481,6 +534,28 @@ class UnitreeG1Adapter:
                 f"{action_name} requires G1ArmActionClient support"
             )
 
+    def _execute_custom_arm_action_sync(self, action_name: str) -> None:
+        with self._native_lock:
+            if self._arm_action is None:
+                raise RobotCommandError(
+                    "custom arm actions require G1ArmActionClient support"
+                )
+            status = self._arm_action.execute_action(action_name)
+            self._require_success(action_name, status)
+
+    def _stop_custom_arm_action_sync(self) -> None:
+        with self._native_lock:
+            if self._arm_action is None:
+                raise RobotCommandError(
+                    "custom arm actions require G1ArmActionClient support"
+                )
+            stop_custom_action = getattr(self._arm_action, "stop_custom_action", None)
+            if not callable(stop_custom_action):
+                raise RobotCommandError(
+                    "G1 bindings do not provide stop_custom_action"
+                )
+            self._require_success("stop custom arm action", stop_custom_action())
+
     def _release_arm_sync(self) -> None:
         with self._native_lock:
             if self._arm_action is not None:
@@ -501,24 +576,42 @@ class UnitreeG1Adapter:
         with self._native_lock:
             loco = self._require_loco()
             no_argument_actions = {
-                "damp": loco.damp,
-                "start": loco.start,
-                "squat": loco.squat,
-                "sit": loco.sit,
-                "stand_up": loco.stand_up,
-                "zero_torque": loco.zero_torque,
-                "high_stand": loco.high_stand,
-                "low_stand": loco.low_stand,
-                "balance_stand": loco.balance_stand,
-                "wave_with_turn": lambda: loco.wave_hand(True),
+                "damp": "damp",
+                "start": "start",
+                "squat": "squat",
+                "sit": "sit",
+                "stand_up": "stand_up",
+                "zero_torque": "zero_torque",
+                "high_stand": "high_stand",
+                "low_stand": "low_stand",
+                "balance_stand": "balance_stand",
+                "stop_move": "stop_move",
             }
-            function = no_argument_actions.get(action)
-            if function is not None:
+            method_name = no_argument_actions.get(action)
+            if method_name is not None:
                 if arguments:
                     raise RobotCommandError(
                         f"{action} does not accept arguments: {sorted(arguments)}"
                     )
+                function = getattr(loco, method_name, None)
+                if not callable(function):
+                    raise RobotCommandError(
+                        f"G1 bindings do not provide loco action {action}"
+                    )
                 self._require_success(action, function())
+                return
+
+            if action == "wave_with_turn":
+                if arguments:
+                    raise RobotCommandError(
+                        f"{action} does not accept arguments: {sorted(arguments)}"
+                    )
+                function = getattr(loco, "wave_hand", None)
+                if not callable(function):
+                    raise RobotCommandError(
+                        "G1 bindings do not provide loco action wave_with_turn"
+                    )
+                self._require_success(action, function(True))
                 return
 
             if action in {"continuous_gait", "switch_move_mode"}:
@@ -535,6 +628,34 @@ class UnitreeG1Adapter:
                 self._require_success(action, method(enabled))
                 return
 
+            if action == "wave_hand":
+                turn_flag = arguments.get("turn_flag", False)
+                if not isinstance(turn_flag, bool) or len(arguments) > 1:
+                    raise RobotCommandError(
+                        "wave_hand accepts one optional boolean 'turn_flag' argument"
+                    )
+                if set(arguments) - {"turn_flag"}:
+                    raise RobotCommandError(
+                        "wave_hand accepts one optional boolean 'turn_flag' argument"
+                    )
+                self._require_success(action, loco.wave_hand(turn_flag))
+                return
+
+            if action == "shake_hand":
+                stage = arguments.get("stage", -1)
+                if (
+                    not isinstance(stage, int)
+                    or isinstance(stage, bool)
+                    or stage not in {-1, 0, 1}
+                    or len(arguments) > 1
+                    or set(arguments) - {"stage"}
+                ):
+                    raise RobotCommandError(
+                        "shake_hand accepts one integer 'stage' argument (-1, 0, or 1)"
+                    )
+                self._require_success(action, loco.shake_hand(stage))
+                return
+
             if action == "set_speed_mode":
                 mode = arguments.get("mode")
                 if (
@@ -548,7 +669,187 @@ class UnitreeG1Adapter:
                 self._require_success(action, loco.set_speed_mode(mode))
                 return
 
+            if action in {
+                "set_fsm_id",
+                "set_balance_mode",
+                "set_swing_height",
+                "set_stand_height",
+                "set_velocity",
+                "move_sdk",
+                "set_task_id",
+                "switch_to_user_ctrl",
+                "switch_to_internal_ctrl",
+                "fsm_api",
+            }:
+                self._execute_low_level_loco_action_sync(action, arguments, loco)
+                return
+
             raise RobotCommandError(f"unsupported G1 loco action: {action}")
+
+    def _execute_low_level_loco_action_sync(
+        self,
+        action: str,
+        arguments: Mapping[str, object],
+        loco: G1LocoClientApi,
+    ) -> None:
+        if action == "set_fsm_id":
+            value = self._require_int_argument(action, arguments, "fsm_id")
+            self._require_success(action, self._call_loco_method(loco, action, value))
+            return
+        if action == "set_balance_mode":
+            value = self._require_int_argument(action, arguments, "balance_mode")
+            self._require_success(action, self._call_loco_method(loco, action, value))
+            return
+        if action == "set_swing_height":
+            value = self._require_float_argument(action, arguments, "swing_height")
+            self._require_success(action, self._call_loco_method(loco, action, value))
+            return
+        if action == "set_stand_height":
+            value = self._require_float_argument(action, arguments, "stand_height")
+            self._require_success(action, self._call_loco_method(loco, action, value))
+            return
+        if action == "set_velocity":
+            expected = {"vx", "vy", "omega"}
+            if set(arguments) not in (expected, expected | {"duration"}):
+                raise RobotCommandError(
+                    "set_velocity requires vx, vy, omega and optional duration"
+                )
+            vx = self._require_number_argument(action, arguments, "vx")
+            vy = self._require_number_argument(action, arguments, "vy")
+            omega = self._require_number_argument(action, arguments, "omega")
+            duration = arguments.get("duration", 1.0)
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+                raise RobotCommandError("set_velocity duration must be numeric")
+            function = getattr(loco, "set_velocity", None)
+            if not callable(function):
+                raise RobotCommandError("G1 bindings do not provide set_velocity")
+            self._require_success(
+                action,
+                function(float(vx), float(vy), float(omega), float(duration)),
+            )
+            return
+        if action == "move_sdk":
+            expected = {"vx", "vy", "vyaw", "continuous_move"}
+            if set(arguments) != expected:
+                raise RobotCommandError(
+                    "move_sdk requires vx, vy, vyaw, and continuous_move"
+                )
+            vx = self._require_number_argument(action, arguments, "vx")
+            vy = self._require_number_argument(action, arguments, "vy")
+            vyaw = self._require_number_argument(action, arguments, "vyaw")
+            continuous_move = arguments["continuous_move"]
+            if not isinstance(continuous_move, bool):
+                raise RobotCommandError(
+                    "move_sdk argument 'continuous_move' must be boolean"
+                )
+            function = getattr(loco, "move", None)
+            if not callable(function):
+                raise RobotCommandError("G1 bindings do not provide move")
+            self._require_success(
+                action,
+                function(float(vx), float(vy), float(vyaw), continuous_move),
+            )
+            return
+        if action == "set_task_id":
+            value = self._require_int_argument(action, arguments, "task_id")
+            self._require_success(action, self._call_loco_method(loco, action, value))
+            return
+        if action == "switch_to_user_ctrl":
+            if arguments:
+                raise RobotCommandError(f"{action} does not accept arguments")
+            self._require_success(
+                action,
+                self._call_loco_method(loco, "switch_to_user_ctrl"),
+            )
+            return
+        if action == "switch_to_internal_ctrl":
+            if set(arguments) != {"mode"} or not isinstance(arguments["mode"], str):
+                raise RobotCommandError(
+                    "switch_to_internal_ctrl requires mode: last, passive, or walkrun"
+                )
+            mode = arguments["mode"].lower()
+            if mode not in {"last", "passive", "walkrun"}:
+                raise RobotCommandError(
+                    "switch_to_internal_ctrl requires mode: last, passive, or walkrun"
+                )
+            self._require_success(
+                action,
+                self._call_loco_method(
+                    loco,
+                    action,
+                    self._resolve_internal_fsm_mode(mode),
+                ),
+            )
+            return
+        if action == "fsm_api":
+            if set(arguments) != {"parameter"} or not isinstance(
+                arguments["parameter"], str
+            ):
+                raise RobotCommandError("fsm_api requires one string 'parameter'")
+            result = self._call_loco_method(loco, "_fsm_api", arguments["parameter"])
+            status = result[0] if isinstance(result, tuple) else result
+            if not isinstance(status, int) or isinstance(status, bool):
+                raise RobotCommandError("fsm_api returned an invalid SDK status")
+            self._require_success(action, status)
+            return
+
+    @staticmethod
+    def _call_loco_method(
+        loco: G1LocoClientApi,
+        action: str,
+        *args: object,
+    ) -> object:
+        function = getattr(loco, action, None)
+        if not callable(function):
+            raise RobotCommandError(f"G1 bindings do not provide {action}")
+        return function(*args)
+
+    @staticmethod
+    def _require_int_argument(
+        action: str,
+        arguments: Mapping[str, object],
+        name: str,
+    ) -> int:
+        if set(arguments) != {name}:
+            raise RobotCommandError(f"{action} requires exactly one integer '{name}' argument")
+        value = arguments[name]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise RobotCommandError(f"{action} argument '{name}' must be an integer")
+        return value
+
+    @staticmethod
+    def _require_float_argument(
+        action: str,
+        arguments: Mapping[str, object],
+        name: str,
+    ) -> float:
+        if set(arguments) != {name}:
+            raise RobotCommandError(f"{action} requires exactly one numeric '{name}' argument")
+        value = arguments[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RobotCommandError(f"{action} argument '{name}' must be numeric")
+        return float(value)
+
+    @staticmethod
+    def _require_number_argument(
+        action: str,
+        arguments: Mapping[str, object],
+        name: str,
+    ) -> float:
+        value = arguments.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RobotCommandError(f"{action} argument '{name}' must be numeric")
+        return float(value)
+
+    @staticmethod
+    def _resolve_internal_fsm_mode(mode: str) -> object:
+        try:
+            module = importlib.import_module("unitree_sdk2_cpp.robot.g1")
+            enum_type = module.InternalFsmMode
+            return getattr(enum_type, mode.upper())
+        except (ImportError, AttributeError):
+            # Fake adapters and older bindings may accept the textual enum.
+            return mode
 
     def _wait_for_arm_action_completion_sync(
         self,
@@ -655,7 +956,16 @@ class UnitreeG1Adapter:
         self,
         timeout_s: float,
     ) -> ActionVerification:
-        return self._wait_for_arm_action_completion_sync(25, "wave", timeout_s)
+        verification = self._wait_for_arm_action_completion_sync(25, "wave", timeout_s)
+        return ActionVerification(
+            completed=verification.completed,
+            observable=verification.observable,
+            message=verification.message,
+            details={
+                **verification.details,
+                "wave_observed": verification.details.get("action_observed", False),
+            },
+        )
 
     def _move_sync(
         self,
@@ -680,19 +990,26 @@ class UnitreeG1Adapter:
     @staticmethod
     def _require_success(operation: str, status: int) -> None:
         if status != 0:
-            detail = {
-                7400: "the rt/armsdk topic is occupied",
-                7401: "the arm is holding; release action 99 first",
-                7402: "invalid arm action id",
-                7404: (
-                    "arm actions require FSM 500, 501, or 801 "
-                    "(FSM 801 modes 0 or 3)"
-                ),
-            }.get(status)
+            detail = UnitreeG1Adapter._sdk_status_detail(status)
             suffix = f": {detail}" if detail else ""
             raise RobotCommandError(
                 f"{operation} failed with SDK status {status}{suffix}"
             )
+
+    @staticmethod
+    def _sdk_status_detail(status: int) -> str | None:
+        return {
+            _LOCO_STATE_NOT_AVAILABLE_STATUS: "LocoState is not available",
+            7302: "invalid locomotion FSM id",
+            7303: "invalid locomotion task id",
+            7400: "the rt/armsdk topic is occupied",
+            7401: "the arm is holding; release action 99 first",
+            7402: "invalid arm action id",
+            7404: (
+                "arm actions require FSM 500, 501, or 801 "
+                "(FSM 801 modes 0 or 3)"
+            ),
+        }.get(status)
 
     @staticmethod
     def _load_bindings() -> UnitreeBindings:

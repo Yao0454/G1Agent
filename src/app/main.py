@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--network", default="", help="Unitree DDS interface, e.g. eth0")
     parser.add_argument("--domain-id", type=int, default=0)
     parser.add_argument("--hardware", action="store_true")
+    parser.add_argument(
+        "--include-operator-only-skills",
+        action="store_true",
+        help="register low-level and dangerous SDK controls for explicit operator use",
+    )
     parser.add_argument("--no-audio", action="store_true", help="disable G1 AudioClient TTS")
     parser.add_argument("--speaker-id", type=int, default=0)
     parser.add_argument("--record-seconds", type=float, default=5.0)
@@ -77,7 +82,14 @@ async def run(args: argparse.Namespace) -> None:
         robot = SimulatedRobotAdapter()
 
     runtime = SkillRuntime(robot)
-    register_g1_skills(runtime)
+    register_g1_skills(
+        runtime,
+        include_operator_only=getattr(
+            args,
+            "include_operator_only_skills",
+            False,
+        ),
+    )
     agent = RobotAgent(runtime, model_name=args.model, base_url=args.ollama_url)
     microphone = (
         MicrophoneASR(
