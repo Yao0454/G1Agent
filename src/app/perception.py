@@ -25,6 +25,7 @@ from agent import (
     VisionPolicyOutcome,
     VisionPolicyWorker,
 )
+from agent.social_vision import GestureObservation, SocialVisionAgent
 from core.runtime import SkillRuntime
 from perception import (
     EventDetector,
@@ -73,6 +74,14 @@ def parse_args() -> argparse.Namespace:
         help="Unitree DDS interface, e.g. eth0",
     )
     parser.add_argument("--domain-id", type=int, default=0)
+    parser.add_argument(
+        "--vision-json-mode", choices=("schema", "prompt"), default="schema",
+        help="Ollama schema constraints or prompt-only JSON with local validation",
+    )
+    parser.add_argument(
+        "--vision-task", choices=("general", "social"), default="general",
+        help="social classifies gestures only; general exposes the skill catalog",
+    )
     parser.add_argument(
         "--include-operator-only-skills",
         action="store_true",
@@ -647,6 +656,12 @@ async def _run(args: argparse.Namespace) -> int:
                 vision_invoker = OllamaVisionInvoker(
                     selected_model,
                     base_url=args.ollama_url,
+                    output_schema=(
+                        GestureObservation.model_json_schema()
+                        if args.vision_task == "social" else None
+                    ),
+                    max_new_tokens=args.vision_max_new_tokens,
+                    constrain_json=args.vision_json_mode == "schema",
                 )
             elif args.vision_backend == "cuda":
                 vision_invoker = CudaVisionInvoker(
@@ -663,7 +678,10 @@ async def _run(args: argparse.Namespace) -> int:
                 )
             else:
                 vision_invoker = None
-            vision_agent = VisionDecisionAgent(
+            agent_class = (
+                SocialVisionAgent if args.vision_task == "social" else VisionDecisionAgent
+            )
+            vision_agent = agent_class(
                 model_name=selected_model,
                 invoker=vision_invoker,
                 timeout_s=args.vision_timeout_s,
@@ -674,7 +692,7 @@ async def _run(args: argparse.Namespace) -> int:
             emit_log(
                 owner="agent.vision_policy",
                 event_type="model_loading",
-                data={"model": vision_agent.model_name},
+                data={"model": vision_agent.model_name, "vision_task": args.vision_task},
             )
             await vision_agent.warmup()
             ready_data: dict[str, object] = {

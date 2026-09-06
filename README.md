@@ -169,6 +169,48 @@ Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播�
 
 ## D435i 视觉闭环
 
+### 4090D 远程推理
+
+远端 `g1-vision-ollama.service` 是当前用户的临时 systemd 服务，监听
+`127.0.0.1:11435`，模型为 `qwen2.5vl:3b`。不需要修改 frpc 或开放推理公网端口。
+服务器重启后需要重新启动该服务：
+
+```bash
+systemd-run --user --unit=g1-vision-ollama \
+  --setenv=OLLAMA_HOST=127.0.0.1:11435 \
+  --setenv=OLLAMA_NUM_PARALLEL=1 /usr/local/bin/ollama serve
+```
+
+机器人端先在一个终端保持隧道运行（已有隧道时不要重复启动）：
+
+```bash
+sh scripts/remote-vision-tunnel.sh
+```
+
+另一终端先验证相机与远程模型，不驱动机器人：
+
+```bash
+sh scripts/run-remote-vision.sh --once
+```
+
+完成现场安全检查并备好急停后使用真机：
+
+```bash
+sh scripts/run-remote-vision.sh --hardware --network eth0
+```
+
+图片和模型提示词通过 SSH 加密发送至服务器，本地保留深度安全和 SkillRuntime。
+远程脚本默认启用 `--vision-task social`：最近 0.8 秒取 3 帧，只识别握手、
+挥手、击掌或不确定，使用结构化输出并在本地映射 Skill。模糊、遮挡、非面向机器人、
+最新帧已收手及非法输出不会触发动作；过期决策也不会因近距离物体而放行。
+全部 Skills 仍保留，通用视觉策略可用 `--vision-task general` 切回。
+当前远端约束解码出现 `Unexpected empty grammar stack`，因此脚本使用
+`--vision-json-mode prompt`，由本地严格校验完整 JSON；不会修补输出来触发动作。
+这些约束不等于实测准确率提升，仍需用现场握手、挥手、击掌和无动作样本验证。
+日志 `model_metrics.round_trip_s` 包括网络耗时；`prompt_eval_s`、`eval_s` 是服务端
+输入处理与生成耗时。首次加载及相同图片的缓存命中耗时不能代表连续视频性能。
+脚本没有保存 SSH 密码；隧道断开时需重新连接，服务不会自动切回本地推理。
+
 D435i 通过 USB 直接连接运行本程序的 Linux 主机。相机取流使用
 `pyrealsense2`，不经过 Unitree SDK；Unitree bindings 仍只负责 G1 动作。
 

@@ -74,22 +74,30 @@ class VisionModelInvoker(Protocol):
 
 
 class OllamaVisionInvoker:
-    """Send an ordered frame set to a local Ollama multimodal model."""
+    """Send ordered frames to Ollama, including through an SSH tunnel."""
 
     def __init__(
         self,
         model_name: str,
         *,
         base_url: str | None = None,
+        output_schema: dict[str, object] | None = None,
+        max_new_tokens: int = 160,
+        constrain_json: bool = True,
     ) -> None:
         ollama = importlib.import_module("ollama")
         self.model_name = model_name
         self._client = ollama.AsyncClient(host=base_url)
+        self.last_metrics: dict[str, object] = {}
+        self.output_schema = output_schema or AgentDecision.model_json_schema()
+        self.max_new_tokens = max_new_tokens
+        self.constrain_json = constrain_json
 
     async def warmup(self) -> None:
         await self._client.show(self.model_name)
 
     async def ainvoke(self, frames: Sequence[object], prompt: str) -> object:
+        started = time.monotonic()
         encoded_frames = [self._as_bytes(frame) for frame in frames]
         response = await self._client.chat(
             model=self.model_name,
@@ -100,10 +108,26 @@ class OllamaVisionInvoker:
                     "images": encoded_frames,
                 }
             ],
-            format=AgentDecision.model_json_schema(),
-            options={"temperature": 0.1, "num_predict": 160},
+            # Full Pydantic schemas trigger a llama.cpp grammar-stack bug on
+            # qwen2.5vl. Generic JSON grammar is stable; fields are validated
+            # strictly by the caller afterwards.
+            format=self.output_schema if self.constrain_json else "json",
+            options={"temperature": 0, "num_predict": self.max_new_tokens},
             keep_alive="30m",
         )
+        payload = response if isinstance(response, Mapping) else response.model_dump()
+        if payload.get("done") is False:
+            raise DecisionAgentError("Ollama returned an incomplete response; check server logs")
+        self.last_metrics = {
+            "round_trip_s": round(time.monotonic() - started, 3),
+            "frame_count": len(frames),
+            "input_tokens": payload.get("prompt_eval_count"),
+            "generated_tokens": payload.get("eval_count"),
+        }
+        for field in ("total_duration", "load_duration", "prompt_eval_duration", "eval_duration"):
+            value = payload.get(field)
+            if isinstance(value, (int, float)):
+                self.last_metrics[field.replace("_duration", "_s")] = round(value / 1e9, 3)
         message = response.get("message") if isinstance(response, Mapping) else None
         if isinstance(message, Mapping):
             return str(message.get("content", ""))
@@ -290,24 +314,8 @@ def _recover_truncated_skill_decision(
     text: str,
     recoverable_skills: set[str],
 ) -> AgentDecision | None:
-    action_match = re.search(
-        r'["\']action["\']\s*:\s*["\']execute_skill["\']',
-        text,
-    )
-    skill_match = re.search(
-        r'["\']skill["\']\s*:\s*["\']([a-zA-Z0-9_-]+)["\']',
-        text,
-    )
-    if action_match is None or skill_match is None:
-        return None
-    skill_name = skill_match.group(1)
-    if skill_name not in recoverable_skills:
-        return None
-    return AgentDecision(
-        action="execute_skill",
-        skill=skill_name,
-        reason="recovered truncated model JSON",
-    )
+    # Never turn incomplete model output into a physical action.
+    return None
 
 
 def _sanitize_visual_noop_payload(value: object) -> object:
@@ -597,6 +605,8 @@ class VisionPolicyWorker:
             raise ValueError("vision policy interval must be greater than zero")
         if frame_count <= 0:
             raise ValueError("vision frame count must be greater than zero")
+        if frame_count < getattr(decision_agent, "minimum_frames", 1):
+            raise ValueError("vision frame count is below the agent's minimum")
         if action_cooldown_s < 0:
             raise ValueError("action cooldown must not be negative")
         if max_decision_age_s is not None and max_decision_age_s <= 0:
@@ -754,7 +764,7 @@ class VisionPolicyWorker:
         while True:
             started = time.monotonic()
             frames = self.video_buffer.sample(self.frame_count)
-            if frames:
+            if len(frames) >= getattr(self.decision_agent, "minimum_frames", 1):
                 try:
                     robot_state = await self.runtime.robot.get_state()
                     policy_context = self._build_policy_context()
@@ -787,10 +797,6 @@ class VisionPolicyWorker:
                         and decision.action
                         in {"execute_skill", "execute_and_speak", "speak"}
                         and decision_age_s > self.max_decision_age_s
-                        and not self._stale_handshake_has_fresh_confirmation(
-                            decision,
-                            decided_at_s=decided_at_s,
-                        )
                     ):
                         self._put_latest(
                             self._outcome_queue,

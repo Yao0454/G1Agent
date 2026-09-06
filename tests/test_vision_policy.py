@@ -160,20 +160,14 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
                 '{"action":"execute_skill","skill":"wave"'
             )
 
-    async def test_truncated_handshake_is_recovered_for_safe_default_skill(
+    async def test_truncated_handshake_is_rejected_even_with_allowlist(
         self,
     ) -> None:
-        decision = VisionDecisionAgent._parse_output(
-            '{\n    "action": "execute_skill",\n'
-            '    "skill": "handshake",\n'
-            '    "arguments": {"arm": {"type": "string", "default":',
-            recoverable_skills={"handshake"},
-        )
-
-        self.assertEqual(decision.action, "execute_skill")
-        self.assertEqual(decision.skill, "handshake")
-        self.assertEqual(decision.arguments, {})
-        self.assertEqual(decision.reason, "recovered truncated model JSON")
+        with self.assertRaisesRegex(Exception, "JSON object"):
+            VisionDecisionAgent._parse_output(
+                '{"action":"execute_skill","skill":"handshake","arguments":',
+                recoverable_skills={"handshake"},
+            )
 
     async def test_truncated_skill_is_rejected_without_recovery_allowlist(
         self,
@@ -268,15 +262,9 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
             await worker.stop()
 
         self.assertNotIn("arm_action", [event[0] for event in robot.events])
-        self.assertTrue(
-            any(
-                outcome.suppressed_reason
-                == "recovered handshake lacks recent close-range depth evidence"
-                for outcome in worker.drain_outcomes()
-            )
-        )
+        self.assertTrue(worker.drain_errors())
 
-    async def test_recent_close_depth_allows_recovered_handshake(self) -> None:
+    async def test_recent_close_depth_cannot_authorize_malformed_handshake(self) -> None:
         robot = SimulatedRobotAdapter()
         runtime = SkillRuntime(robot)
         runtime.register(HandshakeSkill())
@@ -306,7 +294,8 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop()
 
-        self.assertIn("arm_action", [event[0] for event in robot.events])
+        self.assertNotIn("arm_action", [event[0] for event in robot.events])
+        self.assertTrue(worker.drain_errors())
 
     async def test_stale_visual_action_is_not_executed(self) -> None:
         robot = SimulatedRobotAdapter()
@@ -346,7 +335,7 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_stale_handshake_is_revalidated_by_fresh_close_depth(
+    async def test_stale_handshake_is_rejected_despite_fresh_close_depth(
         self,
     ) -> None:
         robot = SimulatedRobotAdapter()
@@ -384,7 +373,11 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop()
 
-        self.assertIn("arm_action", [event[0] for event in robot.events])
+        self.assertNotIn("arm_action", [event[0] for event in robot.events])
+        self.assertTrue(any(
+            "stale visual decision" in (outcome.suppressed_reason or "")
+            for outcome in worker.drain_outcomes()
+        ))
 
     async def test_depth_safety_latch_blocks_mobile_base_skill(self) -> None:
         robot = SimulatedRobotAdapter()
