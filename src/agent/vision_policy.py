@@ -6,10 +6,11 @@ import asyncio
 import importlib
 import io
 import json
+import logging
 import re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from adapters.unitree_audio import SpeechOutput
@@ -20,6 +21,7 @@ from perception import CameraFrame, VideoBuffer
 from robot import RobotState
 
 from .decision import AgentDecision, DecisionAgentError
+from .vision_capture import VisionCapture
 
 DEFAULT_VISION_MODEL = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
 DEFAULT_VISION_GOAL = (
@@ -84,6 +86,7 @@ class OllamaVisionInvoker:
         output_schema: dict[str, object] | None = None,
         max_new_tokens: int = 160,
         constrain_json: bool = True,
+        think: bool | None = None,
     ) -> None:
         ollama = importlib.import_module("ollama")
         self.model_name = model_name
@@ -92,6 +95,7 @@ class OllamaVisionInvoker:
         self.output_schema = output_schema or AgentDecision.model_json_schema()
         self.max_new_tokens = max_new_tokens
         self.constrain_json = constrain_json
+        self.think = think
 
     async def warmup(self) -> None:
         await self._client.show(self.model_name)
@@ -108,16 +112,19 @@ class OllamaVisionInvoker:
                     "images": encoded_frames,
                 }
             ],
-            # Full Pydantic schemas trigger a llama.cpp grammar-stack bug on
-            # qwen2.5vl. Generic JSON grammar is stable; fields are validated
-            # strictly by the caller afterwards.
+            # Generic JSON mode still requires strict caller validation.
+            # Neither mode guarantees a valid response from the server.
             format=self.output_schema if self.constrain_json else "json",
+            stream=False,
+            **({"think": self.think} if self.think is not None else {}),
             options={"temperature": 0, "num_predict": self.max_new_tokens},
             keep_alive="30m",
         )
         payload = response if isinstance(response, Mapping) else response.model_dump()
-        if payload.get("done") is False:
+        if payload.get("done") is not True:
             raise DecisionAgentError("Ollama returned an incomplete response; check server logs")
+        if payload.get("done_reason") == "length":
+            raise DecisionAgentError("Ollama exhausted the output token budget; refusing truncated decision")
         self.last_metrics = {
             "round_trip_s": round(time.monotonic() - started, 3),
             "frame_count": len(frames),
@@ -600,9 +607,14 @@ class VisionPolicyWorker:
         action_cooldown_s: float = 5.0,
         max_decision_age_s: float | None = None,
         queue_size: int = 16,
+        capture: VisionCapture | None = None,
+        rotation_deg: int = 0,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("vision policy interval must be greater than zero")
+        if rotation_deg not in (0, 90, 180, 270):
+            raise ValueError("vision rotation must be 0, 90, 180 or 270")
+        self.rotation_deg = rotation_deg
         if frame_count <= 0:
             raise ValueError("vision frame count must be greater than zero")
         if frame_count < getattr(decision_agent, "minimum_frames", 1):
@@ -612,6 +624,7 @@ class VisionPolicyWorker:
         if max_decision_age_s is not None and max_decision_age_s <= 0:
             raise ValueError("maximum decision age must be greater than zero")
         self.runtime = runtime
+        self.capture = capture
         self.decision_agent = decision_agent
         self.video_buffer = video_buffer
         self.speech = speech
@@ -765,9 +778,26 @@ class VisionPolicyWorker:
             started = time.monotonic()
             frames = self.video_buffer.sample(self.frame_count)
             if len(frames) >= getattr(self.decision_agent, "minimum_frames", 1):
+                capture_path = None
+                try:
+                    frames = self._orient_frames(frames)
+                except Exception as exc:
+                    self._put_latest(self._error_queue, VisionPolicyError(stage="decision", message=f"frame rotation failed: {exc}"))
+                    await asyncio.sleep(self.interval_s)
+                    continue
+                if self.capture is not None and self.capture.available:
+                    try:
+                        # Freeze JPEG inputs once: saved bytes are passed unchanged to Ollama.
+                        frames = tuple(replace(f, rgb=OllamaVisionInvoker._as_bytes(f.rgb)) for f in frames)
+                        capture_path = await asyncio.to_thread(self.capture.begin, frames)
+                        logging.getLogger("agent.vision_capture").info("saved model inputs: %s", capture_path)
+                    except Exception as exc:
+                        logging.getLogger("agent.vision_capture").warning("capture disabled after write failure: %s", exc)
+                        self.capture = None
                 try:
                     robot_state = await self.runtime.robot.get_state()
                     policy_context = self._build_policy_context()
+                    policy_context["vision_rotation_deg"] = self.rotation_deg
                     decision = await self.decision_agent.decide(
                         frames,
                         robot_state,
@@ -775,6 +805,12 @@ class VisionPolicyWorker:
                         policy_context=policy_context,
                     )
                     decided_at_s = time.monotonic()
+                    self._finish_capture(capture_path, {
+                        "decided_at_s": decided_at_s,
+                        "decision": decision.model_dump(),
+                        "model_metrics": dict(self.decision_agent.last_metrics),
+                        "policy_context": policy_context,
+                    })
                     self._put_latest(
                         self._policy_decision_queue,
                         VisionPolicyDecision(
@@ -785,7 +821,8 @@ class VisionPolicyWorker:
                             decision=decision,
                             robot_state=robot_state,
                             policy_context=policy_context,
-                            model_metrics=self.decision_agent.last_metrics,
+                            model_metrics={**self.decision_agent.last_metrics,
+                                           **({"capture_path": str(capture_path)} if capture_path else {})},
                         ),
                     )
                     decision_age_s = max(
@@ -831,6 +868,7 @@ class VisionPolicyWorker:
                             (decision, frames, robot_state),
                         )
                 except Exception as exc:  # noqa: BLE001 - policy must remain alive
+                    self._finish_capture(capture_path, {"error": str(exc)})
                     self._put_latest(
                         self._error_queue,
                         VisionPolicyError(stage="decision", message=str(exc)),
@@ -838,6 +876,26 @@ class VisionPolicyWorker:
             remaining = self.interval_s - (time.monotonic() - started)
             if remaining > 0:
                 await asyncio.sleep(remaining)
+
+    def _finish_capture(self, path, result):
+        if path is not None and self.capture is not None:
+            try:
+                self.capture.finish(path, result)
+            except Exception as exc:
+                logging.getLogger("agent.vision_capture").warning("could not save capture result: %s", exc)
+
+    def _orient_frames(self, frames):
+        if not self.rotation_deg:
+            return frames
+        corrected = []
+        for frame in frames:
+            image = TransformersVisionInvoker._to_pil_image(frame.rgb)
+            # Clockwise image rotation only: depth and detection coordinates stay native.
+            image = image.rotate(-self.rotation_deg, expand=True)
+            encoded = io.BytesIO()
+            image.save(encoded, format="JPEG", quality=90)
+            corrected.append(replace(frame, rgb=encoded.getvalue()))
+        return tuple(corrected)
 
     async def _execution_loop(self) -> None:
         while True:

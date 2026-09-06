@@ -26,6 +26,7 @@ from agent import (
     VisionPolicyWorker,
 )
 from agent.social_vision import GestureObservation, SocialVisionAgent
+from agent.vision_capture import VisionCapture
 from core.runtime import SkillRuntime
 from perception import (
     EventDetector,
@@ -48,6 +49,7 @@ from skills import register_g1_skills
 from .structured_log import configure_structured_logging, emit_log
 
 _LOG_OWNERS = (
+    "agent.vision_capture",
     "app.perception",
     "perception.camera",
     "perception.realsense",
@@ -74,9 +76,13 @@ def parse_args() -> argparse.Namespace:
         help="Unitree DDS interface, e.g. eth0",
     )
     parser.add_argument("--domain-id", type=int, default=0)
+    parser.add_argument("--vision-rotation-deg", type=int, choices=(0, 90, 180, 270), default=0,
+                        help="clockwise RGB rotation for VLM only; depth safety remains native")
+    parser.add_argument("--vision-capture-dir", type=Path, help="opt-in local model input capture (Ollama only)")
+    parser.add_argument("--vision-capture-limit", type=int, default=20, help="maximum captured windows per run; stops saving at limit")
     parser.add_argument(
-        "--vision-json-mode", choices=("schema", "prompt"), default="schema",
-        help="Ollama schema constraints or prompt-only JSON with local validation",
+        "--vision-json-mode", choices=("schema", "json", "prompt"), default="schema",
+        help="Ollama schema or generic JSON constraints (prompt is a legacy alias for json)",
     )
     parser.add_argument(
         "--vision-task", choices=("general", "social"), default="general",
@@ -738,6 +744,8 @@ async def _run(args: argparse.Namespace) -> int:
 
         if vision_agent is None:
             raise RuntimeError("vision policy was not initialized")
+        if args.vision_capture_dir and args.vision_backend != "ollama":
+            raise ValueError("vision capture currently requires --vision-backend ollama")
         video_buffer = VideoBuffer(
             window_s=args.video_window_s,
             max_frames=max(1, math.ceil(args.fps * args.video_window_s)),
@@ -751,6 +759,9 @@ async def _run(args: argparse.Namespace) -> int:
             frame_count=args.vision_frame_count,
             action_cooldown_s=args.action_cooldown_s,
             max_decision_age_s=args.max_decision_age_s,
+            capture=(VisionCapture(args.vision_capture_dir, args.vision_capture_limit)
+                     if args.vision_capture_dir else None),
+            rotation_deg=args.vision_rotation_deg,
         )
         return await run_vision_perception_loop(
             camera=camera,

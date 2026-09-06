@@ -16,6 +16,7 @@ from robot import RobotState
 
 from .decision import AgentDecision, DecisionAgentError
 from .vision_policy import VisionDecisionAgent
+from .social_prompts import EGOCENTRIC_PROMPT
 
 
 class GestureObservation(BaseModel):
@@ -48,20 +49,34 @@ gesture direction is unclear, or handshake/high-five cannot be distinguished.
 Use the latest image to check the gesture is still present. Do not infer hands
 from seeing a person, proximity, or previous greetings. If several people are
 present and the intended recipient is unclear, choose uncertain.
-Return only the supplied JSON schema. Evidence must describe the visible cue:
-offered_hand for handshake, side_to_side for wave, raised_palm for high_five,
-none for none, ambiguous for uncertain. No speech, skill arguments or explanation.
+Return a JSON object, not a schema. Use exactly five keys:
+gesture, hand_visible, directed_at_robot, present_in_latest, evidence.
+The three boolean fields must be true or false, not strings.
+gesture must be exactly one of: "handshake", "wave", "high_five", "none", "uncertain".
+evidence must be exactly one of: "offered_hand", "side_to_side", "raised_palm",
+"none", "ambiguous". NEVER write a sentence in evidence.
+Required gesture/evidence pairs:
+{"handshake":"offered_hand","wave":"side_to_side","high_five":"raised_palm",
+"none":"none","uncertain":"ambiguous"}.
+Only select a pair supported by the images. No markdown or explanation.
 """
 
 
 class SocialVisionAgent(VisionDecisionAgent):
     minimum_frames = 2
 
+    def __init__(self, *, prompt_profile: str = "legacy", **kwargs):
+        if prompt_profile not in ("legacy", "egocentric"):
+            raise ValueError("unknown social prompt profile")
+        super().__init__(**kwargs)
+        self.prompt_profile = prompt_profile
+
     @property
     def last_metrics(self) -> Mapping[str, object]:
         return {
             **super().last_metrics,
             "gesture_observation": getattr(self, "_last_observation", None),
+            "prompt_profile": self.prompt_profile,
         }
 
     async def decide(
@@ -85,6 +100,8 @@ class SocialVisionAgent(VisionDecisionAgent):
             + '"present_in_latest":false,"evidence":"none"}'
             + "\nframe_offsets_s=" + json.dumps(offsets)
         )
+        if self.prompt_profile == "egocentric":
+            prompt = EGOCENTRIC_PROMPT + "\nframe_offsets_s=" + json.dumps(offsets)
         try:
             async with asyncio.timeout(self.timeout_s):
                 output = await self._invoker.ainvoke([f.rgb for f in frames], prompt)

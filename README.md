@@ -193,6 +193,23 @@ sh scripts/remote-vision-tunnel.sh
 sh scripts/run-remote-vision.sh --once
 ```
 
+调试识别时保存实际发往模型的 JPEG 帧（不连接机器人）：
+
+当前安装的相机画面倒置，远程脚本默认 `--vision-rotation-deg 180`，仅旋转 VLM RGB
+输入，抓帧保存旋转后的输入。深度安全和原有人员检测不变。若重新安装相机使其正立，
+请覆盖为 `--vision-rotation-deg 0`，避免再次倒置。
+
+```bash
+sh scripts/run-remote-vision.sh --vision-capture-dir debug/vision --vision-capture-limit 20
+```
+
+默认不抓帧；开启后每次运行创建独立会话目录，最多保存 20 个窗口，达到上限后
+停止保存，推理继续，不自动删除旧文件。每个窗口包含按时间排序的 `frame-*.jpg`、
+带时间戳及哈希的 `input.json`、对应决策或错误的 `result.json`。
+决策日志的 `model_metrics.capture_path` 指向该窗口；`agent.vision_capture` 也会打印保存路径。
+这是模型输入和决策记录，不代表动作执行成功。图像仅新增本地副本，不额外上传；
+可能包含人脸等隐私信息，按需保留。默认目录已加入 Git 忽略；多次启动仍会累计占用磁盘。
+
 完成现场安全检查并备好急停后使用真机：
 
 ```bash
@@ -205,7 +222,8 @@ sh scripts/run-remote-vision.sh --hardware --network eth0
 最新帧已收手及非法输出不会触发动作；过期决策也不会因近距离物体而放行。
 全部 Skills 仍保留，通用视觉策略可用 `--vision-task general` 切回。
 当前远端约束解码出现 `Unexpected empty grammar stack`，因此脚本使用
-`--vision-json-mode prompt`，由本地严格校验完整 JSON；不会修补输出来触发动作。
+`--vision-json-mode json`，请求通用 JSON 并由本地严格校验字段；不会修补输出来触发动作。
+旧参数 `prompt` 为 `json` 的兼容别名。通用 JSON 也可能遇到服务端错误，并非稳定性保证。
 这些约束不等于实测准确率提升，仍需用现场握手、挥手、击掌和无动作样本验证。
 日志 `model_metrics.round_trip_s` 包括网络耗时；`prompt_eval_s`、`eval_s` 是服务端
 输入处理与生成耗时。首次加载及相同图片的缓存命中耗时不能代表连续视频性能。

@@ -68,3 +68,6 @@ def configure_structured_logging(level: int = logging.INFO) -> None:
     root.handlers.clear()
     root.addHandler(_StructuredLogHandler())
     root.setLevel(level)
+    # Preserve transport warnings/errors without emitting every successful POST.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(max(level, logging.WARNING))

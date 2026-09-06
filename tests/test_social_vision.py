@@ -51,6 +51,8 @@ class SocialVisionTests(unittest.IsolatedAsyncioTestCase):
         for changes in (
             {"hand_visible": "true"}, {"arguments": {}},
             {"gesture": {"type": "string"}},
+            {"evidence": "offered_hand for handshake"},
+            {"evidence": "hand is visible and reaching towards the robot"},
         ):
             with self.subTest(changes=changes):
                 with self.assertRaises(DecisionAgentError):
