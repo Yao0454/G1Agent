@@ -21,6 +21,11 @@ perception = [
     "opencv-python-headless",
     "pyrealsense2; platform_machine != 'aarch64'",
 ]
+vision = [
+    "num2words>=0.5.14",
+    "pillow>=10",
+    "transformers>=4.49,<5",
+]
 
 [project.scripts]
 g1agent = "app.main:main"

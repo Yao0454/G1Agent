@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,3 +60,29 @@ class PerceptionResult:
             "confidence": self.confidence,
             "source": self.source,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class CameraFrame:
+    """One aligned camera sample shared by video policy and safety perception."""
+
+    observed_at_s: float
+    rgb: Any
+    depth: Any | None
+    observation: PerceptionResult
+    nearest_obstacle_distance_m: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.observed_at_s < 0:
+            raise ValueError("frame timestamp must not be negative")
+        if self.observation.observed_at_s != self.observed_at_s:
+            raise ValueError("frame and observation timestamps must match")
+        if (
+            self.nearest_obstacle_distance_m is not None
+            and self.nearest_obstacle_distance_m <= 0
+        ):
+            raise ValueError("nearest obstacle distance must be greater than zero")
+
+    @property
+    def source(self) -> str:
+        return self.observation.source

@@ -8,6 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-cuda/
+.cuda-packages/
 
 # Local editor/type-checker and tool caches
 typings/
@@ -15,3 +17,4 @@ typings/
 
 .codex/
 .agents/
+debug/vision/

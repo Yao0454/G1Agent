@@ -21,17 +21,22 @@
                unitree_sdk2_cpp bindings
 ```
 
-Milestone 2 验证了不经过 LLM 的固定视觉触发链；当前 `test` 分支已经升级为
-Milestone 3 的事件决策链：
+当前 `test` 分支默认运行 2 秒滑动视频窗口策略；原来的稀疏事件 Agent 仍可作为
+回退模式：
 
 ```text
-RealSense D435i USB -> person detection -> WorldState -> WorldEvent
-    -> Decision Agent -> AgentDecision -> SkillRuntime -> G1 -> next frame
+                              ┌-> VideoBuffer -> Video VLM -> AgentDecision
+RealSense -> CameraFrame -----|
+                              └-> HOG/depth safety
+                                      |
+                 AgentDecision -> SkillRuntime -> G1
 ```
 
-持续运行时，相机采集、事件决策和动作执行由三个异步阶段组成：D435i 不会因为
-Ollama 推理、G1 动作或 TTS 播放而停止更新 WorldState；有界队列只传递稀疏事件，
-不会把每一帧送给模型。
+相机持续采集 30 FPS，环形缓冲只保留最近 2 秒；视频策略默认以 500 ms 为目标间隔，
+从窗口中均匀抽取 8 帧进行一次判断。VLM 推理、Skill 执行和相机采集相互解耦，
+模型不会逐帧运行。如果一次推理超过 500 ms，策略不会并发堆积请求，而是在本次
+推理完成后再开始下一次。HOG/WorldEvent 保留用于可观测性，中心区域深度安全停止
+不等待 VLM。
 
 ## 目录
 
@@ -71,9 +76,12 @@ uv run g1-wave --hardware --network eth0
 不导入 Agent，也不调用 LLM。`--hardware` 会直接连接真机，没有二次交互确认。
 
 SkillExecutor 会在同一资源锁和执行超时内运行 `execute() -> verify() -> cleanup()`。
-真机 Wave 只有从 `rt/arm/action/state` 依次观察到 `face wave`（动作 ID `25`）和
-`release arm`（动作 ID `99`）后才返回 `succeeded`。如果命令被接受但动作反馈不可用
-或超时，返回 `verification_failed`，不会把接受码误报为动作完成。
+真机 Wave 从 `rt/arm/action/state` 依次观察到 `face wave`（动作 ID `25`）和
+`release arm`（动作 ID `99`）后标记 `completion_verified=true`。部分 G1 固件在
+物理执行动作时始终发布空闲状态 `id=0`；这种情况下 SDK 接受命令后仍返回
+`succeeded`，但在 1 秒反馈探测后标记 `completion_verified=false`。已经观察到动作
+25 后发生中断或在 6 秒内没有完成时，才返回 `verification_failed`。
+Wave 的总 Skill 超时为 20 秒，覆盖最长 10 秒的 SDK RPC 和随后的反馈验证。
 
 ## 安装
 
@@ -161,6 +169,66 @@ Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播�
 
 ## D435i 视觉闭环
 
+### 4090D 远程推理
+
+远端 `g1-vision-ollama.service` 是当前用户的临时 systemd 服务，监听
+`127.0.0.1:11435`，模型为 `qwen2.5vl:3b`。不需要修改 frpc 或开放推理公网端口。
+服务器重启后需要重新启动该服务：
+
+```bash
+systemd-run --user --unit=g1-vision-ollama \
+  --setenv=OLLAMA_HOST=127.0.0.1:11435 \
+  --setenv=OLLAMA_NUM_PARALLEL=1 /usr/local/bin/ollama serve
+```
+
+机器人端先在一个终端保持隧道运行（已有隧道时不要重复启动）：
+
+```bash
+sh scripts/remote-vision-tunnel.sh
+```
+
+另一终端先验证相机与远程模型，不驱动机器人：
+
+```bash
+sh scripts/run-remote-vision.sh --once
+```
+
+调试识别时保存实际发往模型的 JPEG 帧（不连接机器人）：
+
+当前安装的相机画面倒置，远程脚本默认 `--vision-rotation-deg 180`，仅旋转 VLM RGB
+输入，抓帧保存旋转后的输入。深度安全和原有人员检测不变。若重新安装相机使其正立，
+请覆盖为 `--vision-rotation-deg 0`，避免再次倒置。
+
+```bash
+sh scripts/run-remote-vision.sh --vision-capture-dir debug/vision --vision-capture-limit 20
+```
+
+默认不抓帧；开启后每次运行创建独立会话目录，最多保存 20 个窗口，达到上限后
+停止保存，推理继续，不自动删除旧文件。每个窗口包含按时间排序的 `frame-*.jpg`、
+带时间戳及哈希的 `input.json`、对应决策或错误的 `result.json`。
+决策日志的 `model_metrics.capture_path` 指向该窗口；`agent.vision_capture` 也会打印保存路径。
+这是模型输入和决策记录，不代表动作执行成功。图像仅新增本地副本，不额外上传；
+可能包含人脸等隐私信息，按需保留。默认目录已加入 Git 忽略；多次启动仍会累计占用磁盘。
+
+完成现场安全检查并备好急停后使用真机：
+
+```bash
+sh scripts/run-remote-vision.sh --hardware --network eth0
+```
+
+图片和模型提示词通过 SSH 加密发送至服务器，本地保留深度安全和 SkillRuntime。
+远程脚本默认启用 `--vision-task social`：最近 0.8 秒取 3 帧，只识别握手、
+挥手、击掌或不确定，使用结构化输出并在本地映射 Skill。模糊、遮挡、非面向机器人、
+最新帧已收手及非法输出不会触发动作；过期决策也不会因近距离物体而放行。
+全部 Skills 仍保留，通用视觉策略可用 `--vision-task general` 切回。
+当前远端约束解码出现 `Unexpected empty grammar stack`，因此脚本使用
+`--vision-json-mode json`，请求通用 JSON 并由本地严格校验字段；不会修补输出来触发动作。
+旧参数 `prompt` 为 `json` 的兼容别名。通用 JSON 也可能遇到服务端错误，并非稳定性保证。
+这些约束不等于实测准确率提升，仍需用现场握手、挥手、击掌和无动作样本验证。
+日志 `model_metrics.round_trip_s` 包括网络耗时；`prompt_eval_s`、`eval_s` 是服务端
+输入处理与生成耗时。首次加载及相同图片的缓存命中耗时不能代表连续视频性能。
+脚本没有保存 SSH 密码；隧道断开时需重新连接，服务不会自动切回本地推理。
+
 D435i 通过 USB 直接连接运行本程序的 Linux 主机。相机取流使用
 `pyrealsense2`，不经过 Unitree SDK；Unitree bindings 仍只负责 G1 动作。
 
@@ -169,6 +237,18 @@ D435i 通过 USB 直接连接运行本程序的 Linux 主机。相机取流使�
 ```bash
 uv sync --extra perception
 ```
+
+本地 Hugging Face 视频策略还需要：
+
+```bash
+uv sync --extra perception --extra vision
+```
+
+`vision` extra 安装 Transformers、Pillow 和 SmolVLM processor 的轻量依赖，但不会
+替换 Jetson 的 CUDA PyTorch。当前 Jetson 保持 JetPack 5.1.1 / CUDA 11.4，不需要
+升级系统 CUDA。默认 `cuda` 后端由主程序启动常驻 `/usr/bin/python3` 子进程，复用
+系统已有的 `torch 2.0.0+nv23.05` CUDA 环境；主程序与 CUDA worker 之间只传视频帧
+和 JSON 决策。CUDA 不可用时会直接报错，不会静默退回 CPU。
 
 JetPack 5 的系统 glibc 较旧，PyPI 的 ARM64 `pyrealsense2` wheel 可能无法加载。
 在 ARM64 上程序会先尝试当前 Python；如果 binding 不可用，会自动启动常驻的
@@ -182,28 +262,84 @@ OpenCV，不会为每帧重启进程。先验证系统 Python 环境：
 如果 binding 安装在其他解释器中，可传入 `--camera-python /path/to/python`，或设置
 `G1_REALSENSE_PYTHON`。不要为此升级 JetPack 5 的系统 glibc。
 
-启动 Ollama 并准备 Decision Agent 使用的模型：
+默认视频模型是：
+
+```text
+HuggingFaceTB/SmolVLM2-500M-Video-Instruct
+```
+
+先用 Hugging Face CLI 下载模型：
+
+```bash
+HF_HUB_DISABLE_XET=1 hf download \
+  HuggingFaceTB/SmolVLM2-500M-Video-Instruct \
+  --exclude 'onnx/*'
+```
+
+只有一台 D435i 时无需传 `--camera-serial`。先使用模拟机器人验证真实摄像头和
+CUDA VLM，不会连接或驱动实体 G1：
+
+```bash
+.venv/bin/python -m app.perception --once --no-audio
+.venv/bin/python -m app.perception --no-audio
+```
+
+上面默认等价于 `--policy vision --vision-backend cuda --vision-frame-count 1`。
+当前设备的真实 8 帧测量约为 9–12 秒/次、峰值显存约 1.9 GB，因此无法用于
+实时动作响应；2 帧实测仍约为 5.5–7.5 秒。`--vision-interval-s 0.5` 只是最短
+调度间隔，因此当前硬件默认使用最新单帧，并拒绝执行基于超过 5 秒旧画面的动作：
+
+```bash
+.venv/bin/python -m app.perception \
+  --no-audio \
+  --vision-frame-count 1
+```
+
+需要保留两帧时可显式传 `--vision-frame-count 2`，但不适合低延迟握手响应。
+深度安全锁只停止和阻止使用 `mobile_base` 的移动/姿态动作；`handshake`、`wave`
+等仅使用 `upper_body` 的原地动作不会因为人手伸入 0.4 m 安全区而被取消。
+
+完成现场安全检查后，才显式增加真机参数：
+
+```bash
+.venv/bin/python -m app.perception \
+  --hardware \
+  --network eth0 \
+  --no-audio
+```
+
+如果使用 Ollama 的 Qwen2.5-VL：
 
 ```bash
 ollama serve
-ollama pull qwen3:1.7b
+ollama pull qwen2.5vl:3b
+
+uv run --extra perception g1-perception \
+  --hardware \
+  --network eth0 \
+  --camera-serial <front-camera-serial> \
+  --vision-backend ollama \
+  --model qwen2.5vl:3b \
+  --no-audio
 ```
 
-视觉事件只进行一次轻量 Ollama JSON 决策，并关闭 Qwen3 的 thinking 模式。
-输出限制为 64 tokens，模型保持热加载；单次决策默认最多等待 8 秒，可使用
-`--decision-timeout-s` 调整。
+视频决策沿用统一的 `AgentDecision` JSON，并增加两个控制动作：
 
-Jetson Orin NX 16G 推荐使用默认的 `qwen3:1.7b`。本机热模型的完整事件决策约
-`1.8` 秒；`qwen3:8b` 约 `4.9` 秒，更适合质量优先而非低延迟演示。
+```text
+continue  -> 保持当前行为，不启动新 Skill
+interrupt -> 取消当前可中断 Skill，并调用机器人软件 stop
+```
 
-先用模拟机器人验证相机、事件、决策和状态去重：
+相同 Skill/参数/语音正在执行时不会重复启动；执行结束后默认还有 5 秒冷却，可用
+`--action-cooldown-s` 调整。旧事件策略仍可运行：
 
 ```bash
-uv run --extra perception g1-perception --once
-uv run --extra perception g1-perception
+uv run --extra perception g1-perception \
+  --policy event \
+  --model qwen3:1.7b
 ```
 
-默认闭环只处理三种稀疏事件：
+事件策略处理三种稀疏事件：
 
 ```text
 person_entered   -> Decision Agent -> wave / speech / ignore
@@ -215,10 +351,25 @@ person_too_close -> Decision Agent -> move_backward / speech / ignore
 产生一次 `person_too_close`，恢复到 `1.0` 米后才允许再次触发，可以分别使用
 `--too-close-m` 和 `--too-close-release-m` 调整。
 
-连接真实 G1：
+所有运行日志使用固定 JSON Lines envelope：
+
+```json
+{"schema":"g1agent.log.v1","timestamp":"...","level":"info","type":"vision_decision","owner":"agent.vision_policy","data":{}}
+```
+
+每一行都会显示 `owner`。启动日志的 `data.owners` 会列出完整 owner 清单；主要值为
+`perception.camera`、`perception.realsense`、`perception.detector`、`perception.safety`、
+`agent.vision_policy`、`runtime.skill` 和 `robot.adapter`。观测日志默认只打印首次结果、
+状态变化和每 5 秒一条心跳；`--verbose-observations` 恢复逐帧输出，
+`--observation-interval-s <seconds>` 可调整心跳间隔。
+
+连接真实 G1 并使用旧事件策略：
 
 ```bash
-uv run --extra perception g1-perception --hardware --network eth0
+uv run --extra perception g1-perception \
+  --policy event \
+  --hardware \
+  --network eth0
 ```
 
 真机模式下，Decision Agent 的 `speech` 通过现有 Unitree `AudioClient` 播放；
@@ -228,12 +379,50 @@ uv run --extra perception g1-perception --hardware --network eth0
 Decision Agent 的技能目录由当前 `SkillRegistry` 动态生成，新增 Skill 后不需要再
 维护另一份硬编码的技能白名单；每个动作的参数仍由对应 Skill 的 `SkillArgs` 校验。
 
+当前 G1 动作 Skill 由 `skills.register_g1_skills()` 统一注册。安全自治目录包括：
+
+```text
+手臂预设：wave / wave_hand / handshake / shake_hand / two_hand_kiss / left_kiss /
+right_kiss / hands_up / clap / high_five / hug / heart / right_heart / reject /
+right_hand_up / x_ray / high_wave / release_arm
+姿态：squat / sit / stand_up / high_stand / low_stand / balance_stand
+移动：move / move_forward / move_backward / move_left / move_right /
+turn_left / turn_right / stop / stop_move
+```
+
+SDK 里同样存在但不默认暴露给视觉模型的 operator-only Skill 为：
+`start`、`damp`、`zero_torque`、`wave_with_turn`、`continuous_gait`、
+`switch_move_mode`、`set_speed_mode`、`set_fsm_id`、`set_balance_mode`、
+`set_swing_height`、`set_stand_height`、`set_velocity`、`set_task_id`、
+`move_sdk`、
+`switch_to_user_ctrl`、`switch_to_internal_ctrl`、`fsm_api`、
+`execute_custom_arm_action`、`stop_custom_arm_action`。通过
+`register_g1_skills(runtime, include_operator_only=True)` 才会加入这些控制；
+如果需要拿到完整目录而不注册，可调用 `build_g1_all_skills()`。
+命令行显式加载完整目录时增加 `--include-operator-only-skills`。例如：
+
+```bash
+.venv/bin/python -m app.perception \
+  --hardware --network eth0 --no-audio \
+  --include-operator-only-skills
+```
+
+这个开关会把危险控制也加入模型可见目录，只用于人工监管测试；正常视觉自治不要加。
+其中 `damp`、`zero_torque`、显式 FSM/任务 ID、控制模式切换、原始 `fsm_api` 和
+自定义手臂动作会改变控制状态，不能让 VLM 自主选择。`set_velocity` 也只在
+operator-only 目录中提供；默认视觉目录使用带硬限幅和软件 stop 的
+`move`/方向移动 Skills。
+SDK 头文件把 `left kiss` 与 `right kiss` 都映射为动作 ID `12`，代码保持这个
+真实映射而不是伪造两个不同的底层动作。`handshake` 优先使用 arm preset ID `27`，
+没有 `G1ArmActionClient` 时回退到 SDK 示例的 `shake_hand(0)`，持续有限时间后用
+`shake_hand(1)` 释放。
+
 `wave` 使用 G1 `G1ArmActionClient` 的内置 `face wave`（动作 ID `25`）；如果当前
 bindings 没有该客户端，则回退到 `LocoClient.wave_hand()`。内置手臂动作只支持
 FSM `500`、`501`、`801`（FSM `801` 还要求 mode `0` 或 `3`）。SDK 返回 `0` 只表示
 命令被服务接受，不表示动作已经完成；程序会把非零状态转换成可读的失败原因，并
-通过 `rt/arm/action/state` 完成后置验证。旧 bindings 的 fallback 没有这个反馈，
-因此即使命令已发出也会诚实返回 `verification_failed`。
+尽量通过 `rt/arm/action/state` 完成后置验证。旧 bindings 或始终报告 `id=0` 的固件
+会返回成功并标记 `completion_verified=false`，不会把未验证误报成已完成验证。
 
 多台 RealSense 同时连接时可增加 `--camera-serial <serial>`。默认读取
 `640x480@30 FPS` 的彩色和深度流，将深度对齐到彩色画面，并忽略有效深度超过

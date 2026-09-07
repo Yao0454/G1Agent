@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -12,7 +13,7 @@ from collections import deque
 from pathlib import Path
 from typing import TextIO, cast
 
-from .models import PerceptionResult
+from .models import CameraFrame, PerceptionResult
 
 
 class RealSenseBridgeError(RuntimeError):
@@ -123,9 +124,12 @@ class RealSenseBridge:
             raise
 
     def capture(self) -> PerceptionResult:
+        return self.capture_frame(include_rgb=False).observation
+
+    def capture_frame(self, *, include_rgb: bool = True) -> CameraFrame:
         if not self.opened:
             raise RealSenseBridgeError("RealSense worker is not running")
-        self._send({"command": "capture"})
+        self._send({"command": "capture", "include_rgb": include_rgb})
         response = self._read_response(
             expected_type="observation",
             timeout_s=self.frame_timeout_ms / 1000.0 + 10.0,
@@ -139,8 +143,9 @@ class RealSenseBridge:
         try:
             distance_value = payload.get("nearest_person_distance_m")
             confidence_value = payload.get("confidence")
-            return PerceptionResult(
-                observed_at_s=float(payload["observed_at_s"]),
+            observed_at_s = float(payload["observed_at_s"])
+            observation = PerceptionResult(
+                observed_at_s=observed_at_s,
                 person_count=int(payload["person_count"]),
                 nearest_person_distance_m=(
                     float(distance_value) if distance_value is not None else None
@@ -149,6 +154,19 @@ class RealSenseBridge:
                     float(confidence_value) if confidence_value is not None else None
                 ),
                 source=str(payload["source"]),
+            )
+            obstacle_value = payload.get("nearest_obstacle_distance_m")
+            encoded_rgb = payload.get("rgb_jpeg_base64")
+            if include_rgb and not isinstance(encoded_rgb, str):
+                raise ValueError("worker did not return an RGB frame")
+            return CameraFrame(
+                observed_at_s=observed_at_s,
+                rgb=(base64.b64decode(encoded_rgb) if encoded_rgb else None),
+                depth=None,
+                observation=observation,
+                nearest_obstacle_distance_m=(
+                    float(obstacle_value) if obstacle_value is not None else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RealSenseBridgeError(

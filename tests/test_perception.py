@@ -4,6 +4,11 @@ import unittest
 from types import SimpleNamespace
 from typing import cast
 
+from app.perception import (
+    _DepthSafetyGate,
+    _ObservationLogGate,
+    _RepeatedErrorLogGate,
+)
 from perception import (
     EventDetector,
     PerceptionError,
@@ -120,7 +125,7 @@ class FakeDepthFrame(FakeColorFrame):
 
     def get_distance(self, x: int, y: int) -> float:
         self.queries.append((x, y))
-        return self.distances[(x, y)]
+        return self.distances.get((x, y), 2.0)
 
 
 class FakeFrames:
@@ -281,6 +286,26 @@ class RealSensePersonDetectorTests(unittest.TestCase):
         with self.assertRaisesRegex(PerceptionError, "not open"):
             detector.capture()
 
+    def test_capture_frame_keeps_rgb_depth_and_safety_distance(self) -> None:
+        depth = FakeDepthFrame({})
+        detector = RealSensePersonDetector(
+            bindings=make_bindings(
+                pipeline=FakePipeline(FakeFrames(depth)),
+                config=FakeConfig(),
+                align=FakeAlign(),
+                hog=FakeHog([], []),
+            )
+        )
+
+        detector.open()
+        frame = detector.capture_frame()
+        detector.close()
+
+        self.assertIsNotNone(frame.rgb)
+        self.assertIsNotNone(frame.depth)
+        self.assertEqual(frame.nearest_obstacle_distance_m, 2.0)
+        self.assertEqual(frame.observation.person_count, 0)
+
     def test_close_is_idempotent(self) -> None:
         depth = FakeDepthFrame({})
         pipeline = FakePipeline(FakeFrames(depth))
@@ -298,3 +323,60 @@ class RealSensePersonDetectorTests(unittest.TestCase):
         detector.close()
 
         self.assertEqual(pipeline.stop_count, 1)
+
+
+class ObservationLogGateTests(unittest.TestCase):
+    def test_unchanged_observations_are_rate_limited(self) -> None:
+        gate = _ObservationLogGate(interval_s=5.0)
+        self.assertTrue(gate.should_print(observation(1.0, people=0)))
+        self.assertFalse(gate.should_print(observation(2.0, people=0)))
+        self.assertTrue(gate.should_print(observation(6.0, people=0)))
+
+    def test_person_state_changes_are_printed_immediately(self) -> None:
+        gate = _ObservationLogGate(interval_s=5.0)
+        self.assertTrue(gate.should_print(observation(1.0, people=0)))
+        self.assertTrue(gate.should_print(observation(1.1, people=1, distance_m=2.0)))
+        self.assertFalse(gate.should_print(observation(1.2, people=1, distance_m=2.0)))
+
+    def test_verbose_mode_prints_every_observation(self) -> None:
+        gate = _ObservationLogGate(interval_s=5.0, verbose=True)
+        self.assertTrue(gate.should_print(observation(1.0, people=0)))
+        self.assertTrue(gate.should_print(observation(1.1, people=0)))
+
+    def test_state_changes_can_be_periodic_only_for_noisy_detectors(self) -> None:
+        gate = _ObservationLogGate(
+            interval_s=5.0,
+            immediate_state_changes=False,
+        )
+
+        self.assertTrue(gate.should_print(observation(1.0, people=0)))
+        self.assertFalse(gate.should_print(observation(1.1, people=1)))
+        self.assertFalse(gate.should_print(observation(1.2, people=0)))
+        self.assertTrue(gate.should_print(observation(6.0, people=1)))
+
+
+class RepeatedErrorLogGateTests(unittest.TestCase):
+    def test_repeated_errors_are_rate_limited_and_counted(self) -> None:
+        gate = _RepeatedErrorLogGate(interval_s=5.0)
+
+        self.assertEqual(gate.admit("decision", "failed", now_s=1.0), 0)
+        self.assertIsNone(gate.admit("decision", "failed", now_s=2.0))
+        self.assertIsNone(gate.admit("decision", "failed", now_s=3.0))
+        self.assertEqual(gate.admit("decision", "failed", now_s=6.0), 2)
+
+    def test_changed_error_and_recovery_emit_immediately(self) -> None:
+        gate = _RepeatedErrorLogGate(interval_s=5.0)
+
+        self.assertEqual(gate.admit("decision", "first", now_s=1.0), 0)
+        self.assertEqual(gate.admit("execution", "second", now_s=1.1), 0)
+        gate.reset()
+        self.assertEqual(gate.admit("decision", "first", now_s=1.2), 0)
+
+
+class DepthSafetyGateTests(unittest.TestCase):
+    def test_gate_latches_until_release_distance(self) -> None:
+        gate = _DepthSafetyGate(stop_distance_m=0.4, release_distance_m=0.55)
+
+        self.assertEqual(gate.update(0.35), "triggered")
+        self.assertIsNone(gate.update(0.45))
+        self.assertEqual(gate.update(0.6), "released")
