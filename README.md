@@ -240,8 +240,17 @@ Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播�
 
 ### 4090D 远程推理
 
+远程脚本现在默认 `--vision-generate-speech`：模型在同一次视觉判断中生成手势字段与
+简短中文 `speech`，本地校验后组合成 `execute_and_speak`。不是固定话术，也没有新增
+语音输入。实机通过 Unitree AudioClient TTS 播报，模拟模式仅在日志显示文字。
+当前执行顺序为 Skill 返回后再播报（不是动作与声音同步开始）；动作失败不播报。
+相同动作即使文字不同也共享冷却限制，未确认或正在进行的动作不重复说话。
+增加 `--no-audio` 可静音但保留模型生成文字。日志 `speech_spoken=true` 表示 TTS 调用
+成功返回，不代表已通过麦克风验证声音播放完成。
+
 远端 `g1-vision-ollama.service` 是当前用户的临时 systemd 服务，监听
-`127.0.0.1:11435`，模型为 `qwen2.5vl:3b`。不需要修改 frpc 或开放推理公网端口。
+`127.0.0.1:11435`，远程脚本默认模型为 `qwen3.5:9b`，使用 `egocentric` 第一视角
+提示词并关闭思考输出。保留原 `qwen2.5vl:3b` 供回退。不需要修改 frpc 或开放推理公网端口。
 服务器重启后需要重新启动该服务：
 
 ```bash
@@ -293,7 +302,36 @@ sh scripts/run-remote-vision.sh --hardware --network eth0
 当前远端约束解码出现 `Unexpected empty grammar stack`，因此脚本使用
 `--vision-json-mode json`，请求通用 JSON 并由本地严格校验字段；不会修补输出来触发动作。
 旧参数 `prompt` 为 `json` 的兼容别名。通用 JSON 也可能遇到服务端错误，并非稳定性保证。
-这些约束不等于实测准确率提升，仍需用现场握手、挥手、击掌和无动作样本验证。
+2026-09-06 对同一批 23 个人工核对窗口做离线对照：旧 3B+原提示词的动作选择正确
+12/23，新 9B+第一视角提示词正确 22/23；其中握手分别为 0/10 和 10/10，
+12 个无动作窗口均没有动作误触发。新版仍将唯一挥手样本判成击掌。
+随后针对挥手修正第一视角提示：`directed_at_robot` 表示招呼对象是摄像头所在机器人，
+不是要求挥手时手臂直指镜头；同时区分摆动的挥手与静止接触邀请的击掌。
+同一回归集复测为 23/23（握手 10、无动作 12、挥手 1），结果见
+`debug/vision/eval-qwen35-wave-recipient.jsonl`。该集已参与修正验证，不能当作独立测试集；
+仅有一个挥手窗口，仍需现场验证更多动作，不代表百分之百准确。
+未确认的日志会列出 `recipient_unconfirmed`、`hand_not_visible`、`gesture_not_current`
+或 `evidence_mismatch`；这些条件仍然会阻止执行。
+这是同一人、同一房间、时间相关的回放集，不代表通用准确率，也没有验证清晰击掌正样本。
+原始回放结果位于 `debug/vision/eval-qwen35-egocentric.jsonl` 和
+`debug/vision/eval-qwen25-legacy-retry.jsonl`。回放中位耗时约 1.21 秒，可能受缓存影响。
+首次加载较慢，过期动作仍会被拦截，不能因为首次请求慢就提高安全时效上限。
+
+需要回退旧模型时（不改其它配置文件）：
+
+```bash
+sh scripts/run-remote-vision.sh --model qwen2.5vl:3b \
+  --vision-social-profile legacy --no-vision-disable-thinking
+```
+
+离线评测通过真实 `SocialVisionAgent` 生成决策，但不调用机器人或执行 Skill：
+
+```bash
+.venv/bin/python scripts/eval-social-vision.py debug/vision/eval-heldout.json \
+  debug/vision/eval-new-run.jsonl --model qwen3.5:9b --no-think
+```
+
+评测输出文件必须不存在，避免覆盖旧结果。抓帧和标签是本地隐私数据，不提交到仓库。
 日志 `model_metrics.round_trip_s` 包括网络耗时；`prompt_eval_s`、`eval_s` 是服务端
 输入处理与生成耗时。首次加载及相同图片的缓存命中耗时不能代表连续视频性能。
 脚本没有保存 SSH 密码；隧道断开时需重新连接，服务不会自动切回本地推理。

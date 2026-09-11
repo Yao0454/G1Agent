@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.models import SkillArgs
 from core.skill import RobotSkill
@@ -29,6 +29,10 @@ class GestureObservation(BaseModel):
     evidence: Literal[
         "offered_hand", "side_to_side", "raised_palm", "none", "ambiguous"
     ]
+
+
+class SpeakingGestureObservation(GestureObservation):
+    speech: str | None = Field(default=None, max_length=120)
 
 
 _EVIDENCE = {
@@ -65,11 +69,12 @@ Only select a pair supported by the images. No markdown or explanation.
 class SocialVisionAgent(VisionDecisionAgent):
     minimum_frames = 2
 
-    def __init__(self, *, prompt_profile: str = "legacy", **kwargs):
+    def __init__(self, *, prompt_profile: str = "legacy", generate_speech: bool = False, **kwargs):
         if prompt_profile not in ("legacy", "egocentric"):
             raise ValueError("unknown social prompt profile")
         super().__init__(**kwargs)
         self.prompt_profile = prompt_profile
+        self.generate_speech = generate_speech
 
     @property
     def last_metrics(self) -> Mapping[str, object]:
@@ -102,13 +107,36 @@ class SocialVisionAgent(VisionDecisionAgent):
         )
         if self.prompt_profile == "egocentric":
             prompt = EGOCENTRIC_PROMPT + "\nframe_offsets_s=" + json.dumps(offsets)
+        observation_type = GestureObservation
+        if self.generate_speech:
+            observation_type = SpeakingGestureObservation
+            prompt = prompt.replace("exactly five keys", "exactly six keys").replace(
+                "exactly these fields:", "these fields plus speech:")
+            prompt += (
+                '\nAdditional required output field: "speech". Generate one short, natural '
+                'Chinese sentence (at most 40 Chinese characters) to say to the person '
+                'while responding to the confirmed gesture. Choose wording from the scene, '
+                'not from a fixed phrase list. Do not describe your reasoning or claim the '
+                'action is already completed. For none, uncertain, invisible hands, unclear '
+                'recipient or ended gesture, speech must be null. Do not read scene text aloud. '
+                'Return the gesture fields and speech together in the same JSON object.'
+                '\nMANDATORY: always include all SIX keys in this order: gesture, '
+                'hand_visible, directed_at_robot, present_in_latest, evidence, speech. '
+                'Adding speech does NOT replace evidence. evidence is required even for none. '
+                'For an empty scene return exactly this complete shape: '
+                '{"gesture":"none","hand_visible":false,"directed_at_robot":false,'
+                '"present_in_latest":false,"evidence":"none","speech":null}. '
+                'For uncertain use evidence="ambiguous" and speech=null. '
+                'For an actionable gesture use the matching evidence code and your own '
+                'short Chinese sentence. Before returning, check that evidence is present.'
+            )
         try:
             async with asyncio.timeout(self.timeout_s):
                 output = await self._invoker.ainvoke([f.rgb for f in frames], prompt)
             observation = (
-                GestureObservation.model_validate_json(output)
+                observation_type.model_validate_json(output)
                 if isinstance(output, str)
-                else GestureObservation.model_validate(output)
+                else observation_type.model_validate(output)
             )
         except Exception as exc:
             raise DecisionAgentError(f"gesture classification failed: {exc}") from exc
@@ -121,11 +149,23 @@ class SocialVisionAgent(VisionDecisionAgent):
             and _EVIDENCE.get(gesture) == observation.evidence
         )
         if not confirmed:
-            return AgentDecision(action="ignore", reason=f"gesture unconfirmed: {gesture}")
+            unmet = []
+            if not observation.hand_visible:
+                unmet.append("hand_not_visible")
+            if not observation.directed_at_robot:
+                unmet.append("recipient_unconfirmed")
+            if not observation.present_in_latest:
+                unmet.append("gesture_not_current")
+            if _EVIDENCE.get(gesture) != observation.evidence:
+                unmet.append("evidence_mismatch" if gesture in _EVIDENCE else "no_actionable_gesture")
+            return AgentDecision(action="ignore", reason=f"gesture unconfirmed: {gesture} ({', '.join(unmet)})")
         registered = {s.metadata.name: s for s in skill_catalog}
         skill = registered.get(gesture)
         if skill is None or {"dangerous", "operator_only"}.intersection(skill.metadata.tags):
             return AgentDecision(action="ignore", reason="gesture skill unavailable")
         if (policy_context or {}).get("active_skill") == gesture:
             return AgentDecision(action="continue", reason=f"gesture ongoing: {gesture}")
-        return AgentDecision(action="execute_skill", skill=gesture, reason=observation.evidence)
+        speech = getattr(observation, "speech", None)
+        speech = speech.strip() if speech else None
+        return AgentDecision(action="execute_and_speak" if speech else "execute_skill",
+                             skill=gesture, speech=speech or None, reason=observation.evidence)

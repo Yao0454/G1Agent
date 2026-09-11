@@ -30,16 +30,17 @@ async def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--profile", choices=("legacy", "egocentric"), default="egocentric")
     parser.add_argument("--no-think", action="store_true")
+    parser.add_argument("--speech", action="store_true", help="evaluate model-generated speech as well as gestures")
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text())
     invoker = RecordingInvoker(args.model, base_url="http://127.0.0.1:11435",
-                               constrain_json=False, max_new_tokens=160,
+                               constrain_json=False, max_new_tokens=256 if args.speech else 160,
                                think=False if args.no_think else None)
     # Ignore process-wide web proxies for the local SSH tunnel.
     import ollama
     invoker._client = ollama.AsyncClient(host="http://127.0.0.1:11435", trust_env=False)
     agent = SocialVisionAgent(invoker=invoker, model_name=args.model,
-                              prompt_profile=args.profile, timeout_s=90)
+                              prompt_profile=args.profile, generate_speech=args.speech, timeout_s=90)
     rows = []
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as output:
@@ -58,7 +59,7 @@ async def main():
             try:
                 result = await agent.decide(frames, RobotState(hardware=False, connected=True),
                                             build_g1_autonomy_skills())
-                predicted = result.skill if result.action == "execute_skill" else "none"
+                predicted = result.skill if result.action in ("execute_skill", "execute_and_speak") else "none"
                 row.update(decision=result.model_dump(), predicted=predicted,
                            correct=predicted in case["allowed_decisions"],
                            metrics=dict(agent.last_metrics), raw=invoker.raw,
