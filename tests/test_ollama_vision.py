@@ -20,6 +20,13 @@ class OllamaVisionTests(unittest.IsolatedAsyncioTestCase):
         kwargs = invoker._client.chat.call_args.kwargs
         self.assertEqual(kwargs["format"], "json")
         self.assertIs(kwargs["stream"], False)
+        self.assertNotIn("think", kwargs)
+
+    async def test_thinking_can_be_explicitly_disabled(self):
+        invoker = self.invoker({"done": True, "message": {"content": "{}"}})
+        invoker.think = False
+        await invoker.ainvoke([b"jpeg"], "test")
+        self.assertIs(invoker._client.chat.call_args.kwargs["think"], False)
 
     async def test_incomplete_and_token_limited_responses_rejected(self):
         for payload in (

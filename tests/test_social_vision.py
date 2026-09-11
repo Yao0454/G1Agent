@@ -11,6 +11,83 @@ from tests.test_vision_policy import FakeVisionInvoker, camera_frame
 
 
 class SocialVisionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_speaking_none_requires_evidence_and_remains_silent(self):
+        payload = dict(gesture="none", hand_visible=False, directed_at_robot=False,
+                       present_in_latest=True, speech=None)
+        invoker = FakeVisionInvoker([payload])
+        agent = SocialVisionAgent(invoker=invoker, prompt_profile="egocentric", generate_speech=True)
+        with self.assertRaises(DecisionAgentError):
+            await agent.decide([camera_frame(1), camera_frame(2)],
+                RobotState(hardware=False, connected=True), [HandshakeSkill()])
+        payload["evidence"] = "none"
+        result = await agent.decide([camera_frame(1), camera_frame(2)],
+            RobotState(hardware=False, connected=True), [HandshakeSkill()])
+        self.assertEqual(result.action, "ignore")
+        self.assertIsNone(result.speech)
+        self.assertIn('"evidence":"none","speech":null', invoker.calls[-1][1])
+
+    async def test_speaking_action_without_evidence_is_rejected(self):
+        agent = SocialVisionAgent(generate_speech=True, invoker=FakeVisionInvoker([dict(
+            gesture="handshake", hand_visible=True, directed_at_robot=True,
+            present_in_latest=True, speech="你好！")]))
+        with self.assertRaises(DecisionAgentError):
+            await agent.decide([camera_frame(1), camera_frame(2)],
+                RobotState(hardware=False, connected=True), [HandshakeSkill()])
+
+    async def test_generated_speech_is_preserved_only_for_confirmed_action(self):
+        for directed in (True, False):
+            invoker = FakeVisionInvoker([dict(gesture="handshake", evidence="offered_hand",
+                hand_visible=True, present_in_latest=True, directed_at_robot=directed,
+                speech="你好，见到你很开心！")])
+            agent = SocialVisionAgent(invoker=invoker, prompt_profile="egocentric", generate_speech=True)
+            decision = await agent.decide([camera_frame(1), camera_frame(2)],
+                RobotState(hardware=False, connected=True), [HandshakeSkill()])
+            self.assertEqual(decision.action, "execute_and_speak" if directed else "ignore")
+            self.assertEqual(decision.speech, "你好，见到你很开心！" if directed else None)
+            self.assertIn('"speech"', invoker.calls[0][1])
+
+    async def test_active_gesture_does_not_speak_again(self):
+        agent = SocialVisionAgent(generate_speech=True, invoker=FakeVisionInvoker([dict(
+            gesture="wave", evidence="side_to_side", hand_visible=True,
+            directed_at_robot=True, present_in_latest=True, speech="你好呀！")]))
+        decision = await agent.decide([camera_frame(1), camera_frame(2)],
+            RobotState(hardware=False, connected=True), [WaveSkill()],
+            policy_context={"active_skill":"wave"})
+        self.assertEqual(decision.action, "continue")
+        self.assertIsNone(decision.speech)
+
+    async def test_wave_recipient_check_remains_required(self):
+        for directed, action in ((False, "ignore"), (True, "execute_skill")):
+            invoker = FakeVisionInvoker([dict(gesture="wave", evidence="side_to_side",
+                hand_visible=True, present_in_latest=True, directed_at_robot=directed)])
+            agent = SocialVisionAgent(invoker=invoker, prompt_profile="egocentric")
+            decision = await agent.decide([camera_frame(1), camera_frame(2)],
+                RobotState(hardware=False, connected=True), [WaveSkill()])
+            self.assertEqual(decision.action, action)
+            self.assertIn("NOT whether", invoker.calls[0][1])
+            if not directed:
+                self.assertIn("recipient_unconfirmed", decision.reason)
+
+    async def test_egocentric_prompt_keeps_all_execution_checks(self):
+        for field in (None, "hand_visible", "directed_at_robot", "present_in_latest"):
+            payload = dict(gesture="handshake", hand_visible=True,
+                           directed_at_robot=True, present_in_latest=True, evidence="offered_hand")
+            if field is not None:
+                payload[field] = False
+            invoker = FakeVisionInvoker([payload])
+            agent = SocialVisionAgent(invoker=invoker, prompt_profile="egocentric")
+            decision = await agent.decide(
+                [camera_frame(1), camera_frame(2)],
+                RobotState(hardware=False, connected=True), [HandshakeSkill()],
+            )
+            self.assertEqual(decision.action, "execute_skill" if field is None else "ignore")
+            self.assertIn("The camera is the recipient", invoker.calls[0][1])
+            self.assertEqual(agent.last_metrics["prompt_profile"], "egocentric")
+
+    def test_unknown_profile_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SocialVisionAgent(invoker=FakeVisionInvoker([]), prompt_profile="unknown")
+
     async def decide(self, **changes):
         payload = dict(
             gesture="handshake", hand_visible=True, directed_at_robot=True,

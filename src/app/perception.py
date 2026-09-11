@@ -25,7 +25,7 @@ from agent import (
     VisionPolicyOutcome,
     VisionPolicyWorker,
 )
-from agent.social_vision import GestureObservation, SocialVisionAgent
+from agent.social_vision import GestureObservation, SocialVisionAgent, SpeakingGestureObservation
 from agent.vision_capture import VisionCapture
 from core.runtime import SkillRuntime
 from perception import (
@@ -49,6 +49,7 @@ from skills import register_g1_skills
 from .structured_log import configure_structured_logging, emit_log
 
 _LOG_OWNERS = (
+    "robot.audio",
     "agent.vision_capture",
     "app.perception",
     "perception.camera",
@@ -76,6 +77,8 @@ def parse_args() -> argparse.Namespace:
         help="Unitree DDS interface, e.g. eth0",
     )
     parser.add_argument("--domain-id", type=int, default=0)
+    parser.add_argument("--vision-generate-speech", action="store_true",
+                        help="generate a short contextual utterance with each confirmed social gesture")
     parser.add_argument("--vision-rotation-deg", type=int, choices=(0, 90, 180, 270), default=0,
                         help="clockwise RGB rotation for VLM only; depth safety remains native")
     parser.add_argument("--vision-capture-dir", type=Path, help="opt-in local model input capture (Ollama only)")
@@ -87,6 +90,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vision-task", choices=("general", "social"), default="general",
         help="social classifies gestures only; general exposes the skill catalog",
+    )
+    parser.add_argument(
+        "--vision-social-profile", choices=("legacy", "egocentric"), default="legacy",
+        help="social prompt profile; egocentric makes camera-relative gesture intent explicit",
+    )
+    parser.add_argument(
+        "--vision-disable-thinking", action=argparse.BooleanOptionalAction, default=False,
+        help="disable Ollama thinking output for supported models such as Qwen3.5",
     )
     parser.add_argument(
         "--include-operator-only-skills",
@@ -623,6 +634,8 @@ async def _run(args: argparse.Namespace) -> int:
             "model": selected_model,
             "camera_serial": args.camera_serial,
             "hardware": args.hardware,
+            "vision_social_profile": args.vision_social_profile if args.vision_task == "social" else None,
+            "vision_thinking_disabled": args.vision_disable_thinking,
             "vision_frame_count": (
                 args.vision_frame_count if args.policy == "vision" else None
             ),
@@ -663,11 +676,12 @@ async def _run(args: argparse.Namespace) -> int:
                     selected_model,
                     base_url=args.ollama_url,
                     output_schema=(
-                        GestureObservation.model_json_schema()
+                        (SpeakingGestureObservation if args.vision_generate_speech else GestureObservation).model_json_schema()
                         if args.vision_task == "social" else None
                     ),
                     max_new_tokens=args.vision_max_new_tokens,
                     constrain_json=args.vision_json_mode == "schema",
+                    think=False if args.vision_disable_thinking else None,
                 )
             elif args.vision_backend == "cuda":
                 vision_invoker = CudaVisionInvoker(
@@ -692,6 +706,8 @@ async def _run(args: argparse.Namespace) -> int:
                 invoker=vision_invoker,
                 timeout_s=args.vision_timeout_s,
                 goal=args.vision_goal,
+                **({"prompt_profile": args.vision_social_profile,
+                    "generate_speech": args.vision_generate_speech} if args.vision_task == "social" else {}),
             )
 
         if vision_agent is not None:
@@ -725,6 +741,8 @@ async def _run(args: argparse.Namespace) -> int:
                     speaker_id=args.speaker_id,
                 )
                 await audio.connect()
+                emit_log(owner="robot.audio", event_type="audio_ready",
+                         data={"speaker_id": args.speaker_id})
         if decision_agent is not None:
             decision_loop = AutonomousDecisionLoop(
                 runtime,

@@ -1033,7 +1033,7 @@ class VisionPolicyWorker:
         if decision.action in {"speak", "execute_and_speak"}:
             if decision.speech is None:
                 raise RuntimeError("validated vision decision is missing speech")
-            if self.speech is not None:
+            if self.speech is not None and (skill_result is None or skill_result.success):
                 await self.speech.speak(decision.speech)
                 speech_spoken = True
         return skill_result, speech_spoken
@@ -1118,14 +1118,14 @@ class VisionPolicyWorker:
     def _decision_signature(decision: AgentDecision) -> str:
         return json.dumps(
             {
-                "action": decision.action,
+                "action": ("execute_skill" if decision.skill and decision.action == "execute_and_speak" else decision.action),
                 "skill": (
                     VisionPolicyWorker._canonical_skill_name(decision.skill)
                     if decision.skill is not None
                     else None
                 ),
                 "arguments": decision.arguments,
-                "speech": decision.speech,
+                "speech": None if decision.skill else decision.speech,
             },
             ensure_ascii=True,
             sort_keys=True,

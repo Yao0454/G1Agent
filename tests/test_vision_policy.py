@@ -63,6 +63,13 @@ class VideoBufferTests(unittest.TestCase):
 
 
 class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
+    def test_different_generated_speech_cannot_bypass_action_cooldown(self):
+        first = AgentDecision(action="execute_and_speak", skill="wave", speech="你好")
+        second = AgentDecision(action="execute_and_speak", skill="wave", speech="很高兴见到你")
+        silent = AgentDecision(action="execute_skill", skill="wave")
+        self.assertEqual(VisionPolicyWorker._decision_signature(first), VisionPolicyWorker._decision_signature(second))
+        self.assertEqual(VisionPolicyWorker._decision_signature(first), VisionPolicyWorker._decision_signature(silent))
+
     async def test_video_frames_and_runtime_context_produce_agent_decision(self) -> None:
         invoker = FakeVisionInvoker(
             [
