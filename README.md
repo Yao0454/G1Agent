@@ -21,7 +21,7 @@
                unitree_sdk2_cpp bindings
 ```
 
-当前 `test` 分支默认运行 2 秒滑动视频窗口策略；原来的稀疏事件 Agent 仍可作为
+当前视觉入口默认运行 2 秒滑动视频窗口策略；原来的稀疏事件 Agent 仍可作为
 回退模式：
 
 ```text
@@ -49,6 +49,8 @@ src/
 ├── perception/  # D435i 取流、人员检测、最小状态和事件检测
 ├── robot/       # RobotAdapter、G1 SDK 适配器、模拟适配器
 └── skills/      # 具体 Robot Skill
+
+frontend/        # Flutter G1 控制台
 ```
 
 ## Wave 闭环验收
@@ -111,6 +113,73 @@ python3 -m pip install -e ~/unitree_sdk2/unitree_sdk2_bindings
 - `unitree_sdk2_cpp.robot.g1.LocoClient`
 - `unitree_sdk2_cpp.robot.g1.G1ArmActionClient`
 - `unitree_sdk2_cpp.robot.g1.AudioClient`
+
+## Flutter 控制台 FastAPI 后端
+
+`g1-api` 提供与仓库内 `frontend/` 的 `ConsoleController` 状态字段对齐的 REST 和
+WebSocket 接口。默认绑定 `127.0.0.1:8000`、使用模拟机器人，并在进程启动时自动
+创建后端会话：
+
+```bash
+uv run g1-api
+```
+
+真机运行时只需增加 `--hardware`，不再要求现场输入二次确认；TTS 继续使用宇树
+SDK 的 `AudioClient`：
+
+```bash
+uv run g1-api \
+  --hardware \
+  --network eth0 \
+  --host 0.0.0.0
+```
+
+若只需要真机动作、不需要扬声器，可增加 `--no-audio`。D435i 通过 USB 连接运行
+后端的主机，启动时选择真实相机：
+
+```bash
+uv run g1-api --camera-source local
+```
+
+主要接口：
+
+```text
+GET    /api/v1/health
+GET    /api/v1/console
+POST   /api/v1/session/start
+POST   /api/v1/session/stop
+PUT    /api/v1/config/system-prompt
+POST   /api/v1/tasks
+POST   /api/v1/tasks/current/cancel
+GET    /api/v1/skills
+POST   /api/v1/skills/{name}/execute
+PUT    /api/v1/camera/source
+GET    /api/v1/camera/frame.jpg
+DELETE /api/v1/logs
+WS     /api/v1/events
+```
+
+API JSON 使用 camelCase，核心状态可直接映射前端的 `backend`、`starting`、
+`busy`、`promptSaved`、`sessionId`、`cameraSource`、`modelStatus`、
+`skillStatus`、`skillName`、`progressText`、`modelOutput`、`modelDuration`、
+`latency`、`tools` 和 `logs`。WebSocket 连接后首先返回完整 `state`，之后持续发送
+`state`、`log`、`heartbeat` 和 `camera` 事件。
+
+例如提交任务：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/tasks \
+  -H 'content-type: application/json' \
+  -d '{"instruction":"跟我挥挥手","cameraSource":"demo"}'
+```
+
+所有 API 触发的动作仍只走：
+
+```text
+FastAPI -> RobotAgent / SkillRuntime -> RobotSkill -> RobotAdapter -> G1
+```
+
+API 路由不会直接调用 Unitree SDK。
 
 ## 文本入口
 

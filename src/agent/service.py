@@ -10,7 +10,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_ollama import ChatOllama
 
-from adapters.langchain import build_langchain_tools
+from adapters.langchain import SkillToolObserver, build_langchain_tools
 from core.runtime import SkillRuntime
 
 SYSTEM_PROMPT = """You are the conversational controller for a Unitree G1 robot.
@@ -40,6 +40,8 @@ class RobotAgent:
         *,
         model_name: str | None = None,
         base_url: str | None = None,
+        system_prompt: str = SYSTEM_PROMPT,
+        tool_observer: SkillToolObserver | None = None,
         invoker: AgentInvoker | None = None,
     ) -> None:
         self._history: list[BaseMessage] = []
@@ -55,8 +57,8 @@ class RobotAgent:
         )
         graph = create_agent(
             model=model,
-            tools=build_langchain_tools(runtime),
-            system_prompt=SYSTEM_PROMPT,
+            tools=build_langchain_tools(runtime, observer=tool_observer),
+            system_prompt=system_prompt,
         )
         self._invoker = cast(AgentInvoker, cast(object, graph))
 

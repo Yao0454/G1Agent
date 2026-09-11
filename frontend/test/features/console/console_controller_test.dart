@@ -1,0 +1,165 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:g1_frontend/features/console/controllers/console_controller.dart';
+
+import '../../support/fake_console_api.dart';
+
+void main() {
+  late FakeConsoleApi api;
+  late ConsoleController controller;
+  late List<String> messages;
+
+  setUp(() {
+    messages = [];
+    api = FakeConsoleApi(
+      initialPayload: consolePayload(
+        systemPrompt: '来自 FastAPI 的提示词',
+        sessionId: 'API001',
+        robotMode: 'hardware',
+        robotConnected: true,
+        cameraSource: 'local',
+        cameraLabel: 'USB RealSense D435i',
+        cameraStatus: 'ready',
+        cameraFrameAvailable: true,
+        cameraFrameVersion: 3,
+        logs: const [
+          {
+            'id': 'log-1',
+            'time': '12:00:00',
+            'level': 'INFO',
+            'source': 'backend',
+            'message': 'API 已就绪',
+          },
+        ],
+      ),
+    );
+    controller = ConsoleController(onMessage: messages.add, api: api)
+      ..initialize();
+  });
+
+  tearDown(() async {
+    if (controller.isActive) controller.dispose();
+    await api.dispose();
+  });
+
+  testWidgets('initializes from the FastAPI console snapshot', (tester) async {
+    await tester.pump();
+    await controller.refreshFromBackend();
+
+    expect(api.getConsoleCalls, greaterThanOrEqualTo(1));
+    expect(controller.connectedToApi, isTrue);
+    expect(controller.sessionId, 'API001');
+    expect(controller.systemPromptController.text, '来自 FastAPI 的提示词');
+    expect(controller.isHardware, isTrue);
+    expect(controller.cameraSource, 'local');
+    expect(controller.cameraFrameVersion, 3);
+    expect(controller.logs.single.message, 'API 已就绪');
+  });
+
+  testWidgets('starts and stops the backend through REST', (tester) async {
+    await tester.pump();
+
+    await controller.toggleBackend();
+    expect(api.startSessionCalls, 1);
+    expect(controller.backend, isTrue);
+    expect(messages.last, '后端已启动');
+
+    await controller.toggleBackend();
+    expect(api.stopSessionCalls, 1);
+    expect(controller.backend, isFalse);
+    expect(messages.last, '后端已停止');
+  });
+
+  testWidgets('saves prompt and submits and cancels a task through REST', (
+    tester,
+  ) async {
+    await tester.pump();
+    await controller.toggleBackend();
+
+    controller.systemPromptController.text = '只执行安全技能';
+    expect(controller.promptSaved, isFalse);
+    await controller.savePrompt();
+    expect(api.updatePromptCalls, 1);
+    expect(api.lastPrompt, '只执行安全技能');
+    expect(controller.promptSaved, isTrue);
+
+    controller.taskController.text = '向我挥手';
+    await controller.submitTask();
+    expect(api.submitTaskCalls, 1);
+    expect(api.lastInstruction, '向我挥手');
+    expect(api.lastTaskCameraSource, 'local');
+    expect(controller.busy, isTrue);
+
+    await controller.cancelTask('测试中断');
+    expect(api.cancelTaskCalls, 1);
+    expect(api.lastCancelReason, '测试中断');
+    expect(controller.busy, isFalse);
+    expect(controller.skillStatus, 'STOPPED');
+  });
+
+  testWidgets('applies websocket state, log, heartbeat, and camera events', (
+    tester,
+  ) async {
+    await tester.pump();
+
+    api.emitState(
+      consolePayload(
+        backend: true,
+        busy: true,
+        currentTask: '观察前方',
+        modelStatus: '生成中',
+        skillStatus: 'RUNNING',
+        progress: 70,
+        progressText: '正在执行技能',
+        activeStep: 2,
+      ),
+    );
+    api.emit('log', {
+      'id': 'log-live',
+      'time': '12:00:01',
+      'level': 'WARN',
+      'source': 'camera',
+      'message': '深度帧延迟',
+    });
+    api.emit('heartbeat', {'latencyMs': 17, 'connected': false});
+    api.emit('camera', {'frameVersion': 9});
+    await tester.pump();
+
+    expect(controller.backend, isTrue);
+    expect(controller.busy, isTrue);
+    expect(controller.currentTask, '观察前方');
+    expect(controller.progress, 70);
+    expect(controller.logs.last.id, 'log-live');
+    expect(controller.latency, 17);
+    expect(controller.robotConnected, isFalse);
+    expect(controller.cameraFrameVersion, 9);
+    expect(controller.cameraFrameAvailable, isTrue);
+  });
+
+  testWidgets('switches camera and clears logs through REST', (tester) async {
+    await tester.pump();
+
+    await controller.selectCameraSource('demo');
+    expect(api.setCameraSourceCalls, 1);
+    expect(controller.cameraSource, 'demo');
+
+    controller.addLog('INFO', 'test', '本地日志');
+    await controller.clearLogs();
+    expect(api.clearLogsCalls, 1);
+    expect(controller.logs, isEmpty);
+  });
+
+  testWidgets('dispose closes the client and ignores later events', (
+    tester,
+  ) async {
+    await tester.pump();
+    final oldLatency = controller.latency;
+    controller.dispose();
+    await tester.pump();
+
+    api.emit('heartbeat', {'latencyMs': 999, 'connected': false});
+    await tester.pump();
+
+    expect(api.closeCalled, isTrue);
+    expect(controller.latency, oldLatency);
+  });
+}

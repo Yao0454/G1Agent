@@ -1,0 +1,21 @@
+import 'package:flutter/material.dart';
+
+import 'core/theme/app_theme.dart';
+import 'features/console/presentation/console_page.dart';
+import 'features/console/services/console_api.dart';
+
+class G1ConsoleApp extends StatelessWidget {
+  const G1ConsoleApp({super.key, this.api});
+
+  final ConsoleApi? api;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'G1 · 机器人控制台',
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.light,
+      home: G1ConsolePage(api: api),
+    );
+  }
+}
