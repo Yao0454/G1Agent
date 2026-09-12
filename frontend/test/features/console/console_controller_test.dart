@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 import 'package:g1_frontend/features/console/controllers/console_controller.dart';
 
 import '../../support/fake_console_api.dart';
@@ -148,25 +149,82 @@ void main() {
     expect(controller.logs, isEmpty);
   });
 
-  testWidgets('keeps visual loop busy and displays its decision and outcome', (tester) async {
+  testWidgets('keeps the running log view pinned to the newest entry', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ListenableBuilder(
+          listenable: controller,
+          builder: (context, child) => SizedBox(
+            height: 80,
+            child: ListView.builder(
+              controller: controller.logScrollController,
+              itemCount: controller.visibleLogs.length,
+              itemBuilder: (context, index) => SizedBox(
+                height: 24,
+                child: Text(controller.visibleLogs[index].message),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
     await tester.pump();
-    api.emitState(consolePayload(
-      backend: true,
-      busy: true,
-      cameraSource: 'local',
-      modelStatus: '持续视觉交互',
-      modelOutput: '{"decision":{"skill":"wave","speech":"你好"}}',
-      skillStatus: 'DONE',
-      tools: const [
-        {'name': 'vision.decide', 'payload': '{"frame_count":3}', 'arguments': {}, 'result': {'frame_count': 3}},
-        {'name': 'vision.outcome', 'payload': '{"speech_spoken":true}', 'arguments': {}, 'result': {'speech_spoken': true}},
-      ],
-    ));
+
+    for (var index = 0; index < 30; index += 1) {
+      api.emit('log', {
+        'id': 'scroll-$index',
+        'time': '12:00:01',
+        'level': 'INFO',
+        'source': 'test',
+        'message': '日志 $index',
+      });
+    }
+    await tester.pump();
+    await tester.pump();
+
+    final position = controller.logScrollController.position;
+    expect(position.pixels, position.maxScrollExtent);
+    expect(controller.logs.last.message, '日志 29');
+  });
+
+  testWidgets('keeps visual loop busy and displays its decision and outcome', (
+    tester,
+  ) async {
+    await tester.pump();
+    api.emitState(
+      consolePayload(
+        backend: true,
+        busy: true,
+        cameraSource: 'local',
+        modelStatus: '持续视觉交互',
+        modelOutput: '{"decision":{"skill":"wave","speech":"你好"}}',
+        skillStatus: 'DONE',
+        tools: const [
+          {
+            'name': 'vision.decide',
+            'payload': '{"frame_count":3}',
+            'arguments': {},
+            'result': {'frame_count': 3},
+          },
+          {
+            'name': 'vision.outcome',
+            'payload': '{"speech_spoken":true}',
+            'arguments': {},
+            'result': {'speech_spoken': true},
+          },
+        ],
+      ),
+    );
     await tester.pump();
     expect(controller.busy, isTrue);
     expect(controller.modelStatus, '持续视觉交互');
     expect(controller.modelOutput, contains('你好'));
-    expect(controller.tools.map((tool) => tool.name), containsAll(['vision.decide', 'vision.outcome']));
+    expect(
+      controller.tools.map((tool) => tool.name),
+      containsAll(['vision.decide', 'vision.outcome']),
+    );
     await controller.cancelTask('停止视觉交互');
     expect(api.cancelTaskCalls, 1);
     expect(controller.busy, isFalse);

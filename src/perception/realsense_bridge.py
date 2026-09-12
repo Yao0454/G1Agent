@@ -30,6 +30,7 @@ class RealSenseBridge:
         width: int,
         height: int,
         fps: int,
+        detection_fps: float = 5.0,
         frame_timeout_ms: int,
         min_score: float,
         max_distance_m: float | None,
@@ -40,6 +41,7 @@ class RealSenseBridge:
         self.width = width
         self.height = height
         self.fps = fps
+        self.detection_fps = detection_fps
         self.frame_timeout_ms = frame_timeout_ms
         self.min_score = min_score
         self.max_distance_m = max_distance_m
@@ -72,6 +74,8 @@ class RealSenseBridge:
             str(self.height),
             "--fps",
             str(self.fps),
+            "--detection-fps",
+            str(self.detection_fps),
             "--frame-timeout-ms",
             str(self.frame_timeout_ms),
             "--min-score",

@@ -114,6 +114,7 @@ class RealSensePersonDetector:
         width: int = 640,
         height: int = 480,
         fps: int = 30,
+        detection_fps: float = 5.0,
         frame_timeout_ms: int = 5000,
         min_score: float = 0.5,
         max_distance_m: float | None = 4.0,
@@ -122,6 +123,8 @@ class RealSensePersonDetector:
     ) -> None:
         if width <= 0 or height <= 0 or fps <= 0:
             raise ValueError("camera width, height, and fps must be positive")
+        if detection_fps <= 0:
+            raise ValueError("detection_fps must be positive")
         if frame_timeout_ms <= 0:
             raise ValueError("frame_timeout_ms must be positive")
         if max_distance_m is not None and max_distance_m <= 0:
@@ -131,6 +134,7 @@ class RealSensePersonDetector:
         self.width = width
         self.height = height
         self.fps = fps
+        self.detection_fps = detection_fps
         self.frame_timeout_ms = frame_timeout_ms
         self.min_score = min_score
         self.max_distance_m = max_distance_m
@@ -140,6 +144,9 @@ class RealSensePersonDetector:
         self._pipeline: _RealSensePipeline | None = None
         self._align: _RealSenseAlign | None = None
         self._hog: _HogDescriptor | None = None
+        self._last_detection_at_s: float | None = None
+        self._cached_rectangles: Sequence[Sequence[int]] = ()
+        self._cached_scores: Sequence[float] = ()
         self._lock = threading.Lock()
 
     @property
@@ -202,6 +209,7 @@ class RealSensePersonDetector:
         self._pipeline = pipeline
         self._align = align
         self._hog = hog
+        self._reset_detection_cache()
 
     def _open_bridge(self, native_error: PerceptionError) -> None:
         bridge = RealSenseBridge(
@@ -209,6 +217,7 @@ class RealSensePersonDetector:
             width=self.width,
             height=self.height,
             fps=self.fps,
+            detection_fps=self.detection_fps,
             frame_timeout_ms=self.frame_timeout_ms,
             min_score=self.min_score,
             max_distance_m=self.max_distance_m,
@@ -244,6 +253,7 @@ class RealSensePersonDetector:
             self._pipeline = None
             self._align = None
             self._hog = None
+            self._reset_detection_cache()
             if pipeline is None:
                 return
             try:
@@ -278,12 +288,20 @@ class RealSensePersonDetector:
                     raise PerceptionError("D435i returned an incomplete frame set")
 
                 image = bindings.numpy.asanyarray(color_frame.get_data())
-                rectangles, scores = hog.detectMultiScale(
-                    image,
-                    winStride=(8, 8),
-                    padding=(8, 8),
-                    scale=1.05,
-                )
+                detection_at_s = time.monotonic()
+                if self._should_detect(detection_at_s):
+                    rectangles, scores = hog.detectMultiScale(
+                        image,
+                        winStride=(8, 8),
+                        padding=(8, 8),
+                        scale=1.05,
+                    )
+                    self._cached_rectangles = rectangles
+                    self._cached_scores = scores
+                    self._last_detection_at_s = detection_at_s
+                else:
+                    rectangles = self._cached_rectangles
+                    scores = self._cached_scores
                 observed_at_s = time.monotonic()
                 observation = self._build_result(
                     color_frame,
@@ -317,6 +335,17 @@ class RealSensePersonDetector:
                 raise
             except Exception as exc:
                 raise PerceptionError(f"D435i capture failed: {exc}") from exc
+
+    def _should_detect(self, now_s: float) -> bool:
+        last_detection_at_s = self._last_detection_at_s
+        return last_detection_at_s is None or (
+            now_s - last_detection_at_s >= 1.0 / self.detection_fps
+        )
+
+    def _reset_detection_cache(self) -> None:
+        self._last_detection_at_s = None
+        self._cached_rectangles = ()
+        self._cached_scores = ()
 
     def _build_result(
         self,

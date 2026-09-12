@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'camera_grid_painter.dart';
 import 'package:flutter/material.dart';
 
 import '../../../../core/theme/console_colors.dart';
 import '../../controllers/console_controller.dart';
+import '../../services/console_api.dart';
 import 'console_widgets.dart';
 
 class CameraPanel extends StatelessWidget {
@@ -73,22 +76,12 @@ class CameraPanel extends StatelessWidget {
                   fit: StackFit.expand,
                   children: [
                     if (liveCamera)
-                      Image.network(
-                        controller.cameraFrameUrl,
-                        key: const ValueKey('live-camera-frame'),
-                        fit: BoxFit.cover,
-                        gaplessPlayback: true,
-                        errorBuilder: (context, error, stackTrace) =>
-                            const Center(
-                              child: Icon(
-                                Icons.broken_image_outlined,
-                                size: 36,
-                                color: Color(0xFF8296B5),
-                              ),
-                            ),
+                      _LiveCameraFrame(
+                        api: controller.api,
+                        framePath: controller.cameraFramePath,
+                        targetFps: controller.cameraFps,
                       ),
-                    if (!liveCamera)
-                      CustomPaint(painter: CameraGridPainter()),
+                    if (!liveCamera) CustomPaint(painter: CameraGridPainter()),
                     if (!liveCamera)
                       Center(
                         child: Column(
@@ -298,6 +291,105 @@ class CameraPanel extends StatelessWidget {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LiveCameraFrame extends StatefulWidget {
+  const _LiveCameraFrame({
+    required this.api,
+    required this.framePath,
+    required this.targetFps,
+  });
+
+  final ConsoleApi api;
+  final String framePath;
+  final int targetFps;
+
+  @override
+  State<_LiveCameraFrame> createState() => _LiveCameraFrameState();
+}
+
+class _LiveCameraFrameState extends State<_LiveCameraFrame> {
+  Uint8List? _frame;
+  int _generation = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _startFramePump();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LiveCameraFrame oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.api != widget.api ||
+        oldWidget.framePath != widget.framePath ||
+        oldWidget.targetFps != widget.targetFps) {
+      _startFramePump();
+    }
+  }
+
+  void _startFramePump() {
+    final generation = ++_generation;
+    unawaited(_pumpFrames(generation));
+  }
+
+  Future<void> _pumpFrames(int generation) async {
+    final fps = widget.targetFps.clamp(1, 30);
+    final frameInterval = Duration(microseconds: (1000000 / fps).round());
+    while (mounted && generation == _generation) {
+      final started = DateTime.now();
+      try {
+        final frame = await widget.api
+            .fetchCameraFrame(widget.framePath)
+            .timeout(const Duration(seconds: 2));
+        if (!mounted || generation != _generation) return;
+        if (frame.isNotEmpty) setState(() => _frame = frame);
+      } catch (_) {
+        if (!mounted || generation != _generation) return;
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+
+      final elapsed = DateTime.now().difference(started);
+      final remaining = frameInterval - elapsed;
+      if (remaining > Duration.zero) await Future<void>.delayed(remaining);
+    }
+  }
+
+  @override
+  void dispose() {
+    _generation += 1;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final frame = _frame;
+    if (frame == null) {
+      return const Center(
+        child: SizedBox.square(
+          dimension: 24,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: Color(0xFF8296B5),
+          ),
+        ),
+      );
+    }
+    return RepaintBoundary(
+      child: Image.memory(
+        frame,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (context, error, stackTrace) => const Center(
+          child: Icon(
+            Icons.broken_image_outlined,
+            size: 36,
+            color: Color(0xFF8296B5),
+          ),
         ),
       ),
     );

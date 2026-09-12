@@ -34,7 +34,6 @@ class ConsoleController extends ChangeNotifier {
   bool backend = false;
   bool starting = false;
   bool busy = false;
-  bool paused = false;
   bool promptSaved = true;
   bool cameraExpanded = false;
   bool robotConnected = false;
@@ -68,6 +67,7 @@ class ConsoleController extends ChangeNotifier {
   bool _disposed = false;
   bool _applyingServerPrompt = false;
   bool _refreshInFlight = false;
+  bool _logScrollScheduled = false;
 
   bool get isActive => !_disposed;
   bool get isHardware => robotMode == 'hardware';
@@ -80,7 +80,7 @@ class ConsoleController extends ChangeNotifier {
     _initialized = true;
     systemPromptController.addListener(onPromptChanged);
     taskController.addListener(refresh);
-    searchController.addListener(refresh);
+    searchController.addListener(_onLogFilterChanged);
     addLog('INFO', 'console', '正在连接 G1 FastAPI 后端。', refresh: false);
     clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!isActive) return;
@@ -169,11 +169,14 @@ class ConsoleController extends ChangeNotifier {
         robotConnected = data['connected'] as bool? ?? robotConnected;
         _update(() {});
       case 'camera':
+        final shouldRefresh = !cameraFrameAvailable || cameraStatus != 'ready';
         cameraFrameVersion =
             (data['frameVersion'] as num?)?.toInt() ?? cameraFrameVersion;
         cameraFrameAvailable = true;
         cameraStatus = 'ready';
-        _update(() {});
+        // The image widget pulls frames independently. Rebuilding the whole
+        // console for every camera frame starves image decoding on Flutter Web.
+        if (shouldRefresh) _update(() {});
     }
   }
 
@@ -259,6 +262,12 @@ class ConsoleController extends ChangeNotifier {
     if (isActive) _update(() {});
   }
 
+  void _onLogFilterChanged() {
+    if (!isActive) return;
+    notifyListeners();
+    _scheduleLogScroll();
+  }
+
   void onPromptChanged() {
     if (!_applyingServerPrompt && promptSaved) {
       _update(() => promptSaved = false);
@@ -291,15 +300,16 @@ class ConsoleController extends ChangeNotifier {
   }
 
   void _scheduleLogScroll() {
-    if (paused) return;
+    if (!isActive || _logScrollScheduled) return;
+    _logScrollScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (isActive && logScrollController.hasClients) {
-        logScrollController.animateTo(
-          logScrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-        );
-      }
+      _logScrollScheduled = false;
+      if (!isActive || !logScrollController.hasClients) return;
+      final position = logScrollController.position;
+      if (position.pixels == position.maxScrollExtent) return;
+      // New events can arrive several times per frame. Jumping after layout is
+      // deterministic and cannot be interrupted by another scroll animation.
+      logScrollController.jumpTo(position.maxScrollExtent);
     });
   }
 
@@ -395,8 +405,10 @@ class ConsoleController extends ChangeNotifier {
 
   void toggleCameraExpanded() =>
       _update(() => cameraExpanded = !cameraExpanded);
-  void setLogLevel(String value) => _update(() => logLevel = value);
-  void toggleLogPaused() => _update(() => paused = !paused);
+  void setLogLevel(String value) {
+    _update(() => logLevel = value);
+    _scheduleLogScroll();
+  }
 
   Future<void> clearLogs() async {
     try {

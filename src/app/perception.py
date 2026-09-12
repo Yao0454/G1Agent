@@ -25,7 +25,11 @@ from agent import (
     VisionPolicyOutcome,
     VisionPolicyWorker,
 )
-from agent.social_vision import GestureObservation, SocialVisionAgent, SpeakingGestureObservation
+from agent.social_vision import (
+    GestureObservation,
+    SocialVisionAgent,
+    SpeakingGestureObservation,
+)
 from agent.vision_capture import VisionCapture
 from core.runtime import SkillRuntime
 from perception import (
@@ -197,6 +201,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument(
+        "--detection-fps",
+        type=float,
+        default=5.0,
+        help="person detection rate; RGB capture continues at --fps",
+    )
     parser.add_argument("--frame-timeout-ms", type=int, default=5000)
     parser.add_argument("--min-score", type=float, default=0.5)
     parser.add_argument(
@@ -604,6 +614,7 @@ async def _run(args: argparse.Namespace) -> int:
         width=args.width,
         height=args.height,
         fps=args.fps,
+        detection_fps=args.detection_fps,
         frame_timeout_ms=args.frame_timeout_ms,
         min_score=args.min_score,
         max_distance_m=args.max_distance_m,

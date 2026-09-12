@@ -254,6 +254,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)
+    parser.add_argument(
+        "--camera-detection-fps",
+        type=float,
+        default=5.0,
+        help="person detection rate; RGB preview continues at --camera-fps",
+    )
     parser.add_argument("--vision-model", default="qwen3.5:9b")
     parser.add_argument("--vision-url", default="http://127.0.0.1:11435")
     parser.add_argument(
@@ -279,6 +285,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         camera_width=args.camera_width,
         camera_height=args.camera_height,
         camera_fps=args.camera_fps,
+        camera_detection_fps=args.camera_detection_fps,
         vision_model=args.vision_model,
         vision_url=args.vision_url,
         vision_rotation_deg=args.vision_rotation_deg,

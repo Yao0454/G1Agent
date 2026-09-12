@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:g1_frontend/features/console/models/console_snapshot.dart';
 import 'package:g1_frontend/features/console/services/console_api.dart';
@@ -96,6 +97,7 @@ class FakeConsoleApi implements ConsoleApi {
   int cancelTaskCalls = 0;
   int setCameraSourceCalls = 0;
   int clearLogsCalls = 0;
+  int fetchCameraFrameCalls = 0;
   bool closeCalled = false;
   String? lastPrompt;
   String? lastInstruction;
@@ -213,6 +215,12 @@ class FakeConsoleApi implements ConsoleApi {
     clearLogsCalls += 1;
     _payload = {..._payload, 'logs': <Map<String, dynamic>>[]};
     return snapshot;
+  }
+
+  @override
+  Future<Uint8List> fetchCameraFrame(String path) async {
+    fetchCameraFrameCalls += 1;
+    return Uint8List(0);
   }
 
   @override

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -30,6 +31,7 @@ abstract interface class ConsoleApi {
   Future<ConsoleSnapshot> cancelTask(String reason);
   Future<ConsoleSnapshot> setCameraSource(String source);
   Future<ConsoleSnapshot> clearLogs();
+  Future<Uint8List> fetchCameraFrame(String path);
   Stream<Map<String, dynamic>> events();
   Uri cameraFrameUri(String path, int version);
   Future<void> close();
@@ -42,7 +44,7 @@ class HttpConsoleApi implements ConsoleApi {
 
   static const defaultBaseUrl = String.fromEnvironment(
     'G1_API_BASE_URL',
-    defaultValue: 'http://127.0.0.1:8000',
+    defaultValue: 'http://192.168.31.45:8000',
   );
 
   @override
@@ -97,6 +99,21 @@ class HttpConsoleApi implements ConsoleApi {
   @override
   Future<ConsoleSnapshot> clearLogs() async =>
       ConsoleSnapshot.fromJson(await _delete('/api/v1/logs'));
+
+  @override
+  Future<Uint8List> fetchCameraFrame(String path) async {
+    final uri = _uri(path).replace(
+      queryParameters: {'t': DateTime.now().microsecondsSinceEpoch.toString()},
+    );
+    final response = await _client.get(uri);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ConsoleApiException(
+        '摄像头画面请求失败（HTTP ${response.statusCode}）',
+        statusCode: response.statusCode,
+      );
+    }
+    return response.bodyBytes;
+  }
 
   @override
   Stream<Map<String, dynamic>> events() async* {

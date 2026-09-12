@@ -145,6 +145,7 @@ class BackendConfig:
     camera_width: int = 640
     camera_height: int = 480
     camera_fps: int = 30
+    camera_detection_fps: float = 5.0
     vision_model: str = "qwen3.5:9b"
     vision_url: str = "http://127.0.0.1:11435"
     vision_rotation_deg: int = 180
@@ -155,6 +156,8 @@ class BackendConfig:
     def __post_init__(self) -> None:
         if self.vision_rotation_deg not in (0, 90, 180, 270):
             raise ValueError("invalid vision rotation")
+        if self.camera_detection_fps <= 0:
+            raise ValueError("camera detection FPS must be positive")
         if (
             self.vision_max_age_s <= 0
             or self.vision_window_s <= 0
@@ -317,6 +320,7 @@ class ConsoleBackend(SkillToolObserver):
             width=self.config.camera_width,
             height=self.config.camera_height,
             fps=self.config.camera_fps,
+            detection_fps=self.config.camera_detection_fps,
         )
 
     async def start(self) -> ConsoleSnapshot:

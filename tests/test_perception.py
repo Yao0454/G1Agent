@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 from app.perception import (
-    parse_args,
     _DepthSafetyGate,
     _ObservationLogGate,
     _RepeatedErrorLogGate,
+    parse_args,
 )
 from perception import (
     EventDetector,
@@ -202,6 +202,7 @@ class FakeHog:
         self.rectangles = rectangles
         self.scores = scores
         self.detector: object | None = None
+        self.call_count = 0
 
     def setSVMDetector(self, detector: object) -> None:
         self.detector = detector
@@ -214,6 +215,7 @@ class FakeHog:
         padding: tuple[int, int],
         scale: float,
     ) -> tuple[list[tuple[int, int, int, int]], list[float]]:
+        self.call_count += 1
         return self.rectangles, self.scores
 
 
@@ -318,6 +320,34 @@ class RealSensePersonDetectorTests(unittest.TestCase):
         self.assertIsNotNone(frame.depth)
         self.assertEqual(frame.nearest_obstacle_distance_m, 2.0)
         self.assertEqual(frame.observation.person_count, 0)
+
+    def test_capture_throttles_expensive_detection_without_throttling_frames(
+        self,
+    ) -> None:
+        depth = FakeDepthFrame({(30, 50): 1.5})
+        pipeline = FakePipeline(FakeFrames(depth))
+        hog = FakeHog([(10, 20, 40, 60)], [1.0])
+        detector = RealSensePersonDetector(
+            detection_fps=5.0,
+            bindings=make_bindings(
+                pipeline=pipeline,
+                config=FakeConfig(),
+                align=FakeAlign(),
+                hog=hog,
+            ),
+        )
+
+        detector.open()
+        with patch(
+            "perception.realsense.time.monotonic",
+            side_effect=(1.0, 1.01, 1.05, 1.06, 1.25, 1.26),
+        ):
+            frames = [detector.capture_frame() for _ in range(3)]
+        detector.close()
+
+        self.assertEqual(len(pipeline.timeout_calls), 3)
+        self.assertEqual(hog.call_count, 2)
+        self.assertTrue(all(frame.observation.person_count == 1 for frame in frames))
 
     def test_close_is_idempotent(self) -> None:
         depth = FakeDepthFrame({})

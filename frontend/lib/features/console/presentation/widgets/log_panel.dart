@@ -28,9 +28,9 @@ class LogPanel extends StatelessWidget {
             children: [
               dot(const Color(0xFF739DFF), glow: true),
               const SizedBox(width: 6),
-              Text(
-                controller.paused ? '已暂停' : '实时',
-                style: const TextStyle(color: Color(0xFF7891B6), fontSize: 11),
+              const Text(
+                '实时',
+                style: TextStyle(color: Color(0xFF7891B6), fontSize: 11),
               ),
             ],
           ),
@@ -86,10 +86,6 @@ class LogPanel extends StatelessWidget {
               ),
             ),
           ),
-          _logAction(
-            controller.paused ? '继续' : '暂停',
-            controller.toggleLogPaused,
-          ),
           _logAction('清空', controller.clearLogs),
           IconButton(
             tooltip: '复制全部日志',
@@ -141,12 +137,9 @@ class LogPanel extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Text(
-                  controller.paused ? '显示已暂停，日志仍在后台记录' : '自动滚动至最新日志',
-                  style: const TextStyle(
-                    color: Color(0xFFA3AEC0),
-                    fontSize: 10,
-                  ),
+                const Text(
+                  '自动滚动至最新日志',
+                  style: TextStyle(color: Color(0xFFA3AEC0), fontSize: 10),
                 ),
                 const Spacer(),
                 if (!mobile)

@@ -14,6 +14,7 @@ def parse_args():
     parser.add_argument("--width", type=int, required=True)
     parser.add_argument("--height", type=int, required=True)
     parser.add_argument("--fps", type=int, required=True)
+    parser.add_argument("--detection-fps", type=float, required=True)
     parser.add_argument("--frame-timeout-ms", type=int, required=True)
     parser.add_argument("--min-score", type=float, required=True)
     parser.add_argument("--max-distance-m", type=float)
@@ -67,6 +68,9 @@ class Detector:
             self.align = rs.align(rs.stream.color)
             self.hog = cv2.HOGDescriptor()
             self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+            self.last_detection_at_s = None
+            self.cached_rectangles = ()
+            self.cached_scores = ()
         except Exception:
             self.close()
             raise
@@ -80,12 +84,24 @@ class Detector:
             raise RuntimeError("D435i returned an incomplete frame set")
 
         image = self.numpy.asanyarray(color_frame.get_data())
-        rectangles, scores = self.hog.detectMultiScale(
-            image,
-            winStride=(8, 8),
-            padding=(8, 8),
-            scale=1.05,
-        )
+        detection_at_s = time.monotonic()
+        if (
+            self.last_detection_at_s is None
+            or detection_at_s - self.last_detection_at_s
+            >= 1.0 / self.args.detection_fps
+        ):
+            rectangles, scores = self.hog.detectMultiScale(
+                image,
+                winStride=(8, 8),
+                padding=(8, 8),
+                scale=1.05,
+            )
+            self.cached_rectangles = rectangles
+            self.cached_scores = scores
+            self.last_detection_at_s = detection_at_s
+        else:
+            rectangles = self.cached_rectangles
+            scores = self.cached_scores
         accepted_scores = []
         distances = []
         width = color_frame.get_width()
