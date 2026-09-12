@@ -25,6 +25,8 @@ class Camera:
         self.opened = False
         self.fail = False
         self.stale = False
+        self.distance_m = 2.0
+        self.capture_count = 0
 
     def open(self):
         self.opened = True
@@ -34,6 +36,7 @@ class Camera:
 
     def capture_frame(self):
         time.sleep(0.02)
+        self.capture_count += 1
         if self.fail:
             raise RuntimeError("test camera disconnected")
         now = time.monotonic() - (20 if self.stale else 0)
@@ -42,7 +45,7 @@ class Camera:
             rgb=self.rgb,
             depth=None,
             observation=PerceptionResult(observed_at_s=now, source="test"),
-            nearest_obstacle_distance_m=2,
+            nearest_obstacle_distance_m=self.distance_m,
         )
 
 
@@ -89,6 +92,23 @@ class Audio:
 
     async def close(self):
         pass
+
+
+class BlockingSafetyWorker:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def observe_frame(self, frame):
+        pass
+
+    def set_safety_latched(self, latched):
+        pass
+
+    async def stop_locomotion_for_safety(self, reason):
+        self.started.set()
+        await self.release.wait()
+        return False
 
 
 def wait_for(client, predicate):
@@ -238,3 +258,30 @@ class ConsoleVisionTests(unittest.TestCase):
             )
             client.put("/api/v1/camera/source", json={"source": "demo"})
             self.assertEqual(len(backend._video_buffer), 0)
+
+
+class ConsoleCameraConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_depth_safety_stop_does_not_block_camera_capture(self):
+        camera = Camera()
+        camera.distance_m = 0.2
+        backend = ConsoleBackend(
+            BackendConfig(audio_enabled=False, vision_rotation_deg=0),
+            agent_factory=fake_agent_factory,
+            camera_factory=lambda: camera,
+        )
+        worker = BlockingSafetyWorker()
+        backend._vision_worker = worker
+        camera_task = asyncio.create_task(backend._camera_loop(camera))
+
+        try:
+            await asyncio.wait_for(worker.started.wait(), timeout=1.0)
+            count_while_stop_is_blocked = camera.capture_count
+            await asyncio.sleep(0.1)
+            self.assertGreater(camera.capture_count, count_while_stop_is_blocked)
+        finally:
+            worker.release.set()
+            safety_task = backend._safety_stop_task
+            if safety_task is not None:
+                await asyncio.wait_for(safety_task, timeout=1.0)
+            camera_task.cancel()
+            await asyncio.gather(camera_task, return_exceptions=True)

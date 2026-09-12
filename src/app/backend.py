@@ -238,6 +238,7 @@ class ConsoleBackend(SkillToolObserver):
         self._audio: UnitreeAudioOutput | None = None
         self._camera: RealSensePersonDetector | None = None
         self._camera_task: asyncio.Task[None] | None = None
+        self._safety_stop_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -401,6 +402,9 @@ class ConsoleBackend(SkillToolObserver):
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
         await self._stop_camera()
+        safety_stop = self._safety_stop_task
+        if safety_stop is not None and safety_stop is not asyncio.current_task():
+            await asyncio.gather(safety_stop, return_exceptions=True)
         if self._audio is not None:
             await self._audio.close()
             self._audio = None
@@ -505,14 +509,7 @@ class ConsoleBackend(SkillToolObserver):
                     worker.observe_frame(frame)
                     worker.set_safety_latched(self._safety_gate.latched)
                     if transition == "triggered":
-                        await worker.stop_locomotion_for_safety(
-                            "console depth safety stop"
-                        )
-                        await self._log(
-                            "WARN",
-                            "perception.safety",
-                            "深度安全停止：仅限制底盘，非手臂安全保证。",
-                        )
+                        self._schedule_depth_safety_stop(worker)
                 self.latest_observation = {
                     **frame.observation.to_dict(),
                     "nearest_obstacle_distance_m": (frame.nearest_obstacle_distance_m),
@@ -535,6 +532,39 @@ class ConsoleBackend(SkillToolObserver):
             self.latest_frame = None
             await self._log("ERROR", "camera", f"D435i 采集失败：{exc}")
             self._emit_state()
+
+    def _schedule_depth_safety_stop(self, worker: VisionPolicyWorker) -> None:
+        task = self._safety_stop_task
+        if task is not None and not task.done():
+            return
+        self._safety_stop_task = asyncio.create_task(
+            self._handle_depth_safety_stop(worker),
+            name="g1-console-depth-safety-stop",
+        )
+
+    async def _handle_depth_safety_stop(
+        self,
+        worker: VisionPolicyWorker,
+    ) -> None:
+        current = asyncio.current_task()
+        try:
+            await self._log(
+                "WARN",
+                "perception.safety",
+                "深度安全停止：仅限制底盘，非手臂安全保证。",
+            )
+            await worker.stop_locomotion_for_safety(
+                "console depth safety stop"
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate the camera producer
+            await self._log(
+                "ERROR",
+                "perception.safety",
+                f"深度安全停止执行失败：{exc}",
+            )
+        finally:
+            if self._safety_stop_task is current:
+                self._safety_stop_task = None
 
     def _vision_frame_jpeg(self, frame: CameraFrame) -> bytes:
         data = self._frame_jpeg(frame)
