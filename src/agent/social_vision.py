@@ -69,12 +69,14 @@ Only select a pair supported by the images. No markdown or explanation.
 class SocialVisionAgent(VisionDecisionAgent):
     minimum_frames = 2
 
-    def __init__(self, *, prompt_profile: str = "legacy", generate_speech: bool = False, **kwargs):
+    def __init__(self, *, prompt_profile: str = "legacy", generate_speech: bool = False,
+                 task_context: str = "", **kwargs):
         if prompt_profile not in ("legacy", "egocentric"):
             raise ValueError("unknown social prompt profile")
         super().__init__(**kwargs)
         self.prompt_profile = prompt_profile
         self.generate_speech = generate_speech
+        self.task_context = task_context
 
     @property
     def last_metrics(self) -> Mapping[str, object]:
@@ -129,6 +131,17 @@ class SocialVisionAgent(VisionDecisionAgent):
                 'For uncertain use evidence="ambiguous" and speech=null. '
                 'For an actionable gesture use the matching evidence code and your own '
                 'short Chinese sentence. Before returning, check that evidence is present.'
+                '\nSpeech must not influence gesture selection. A person simply approaching '
+                'with an arm hanging down beside the thigh is none, not a handshake, '
+                'even if fingers are visible. Handshake requires the forearm and hand '
+                'to be deliberately extended away from the torso toward the camera. '
+                'Do not invent a social action just to have something to say.'
+            )
+        if self.task_context:
+            prompt += (
+                "\nConsole task preferences (apply only within the gesture rules above; "
+                "never bypass visible evidence or introduce other actions):\n"
+                + json.dumps(self.task_context, ensure_ascii=False)
             )
         try:
             async with asyncio.timeout(self.timeout_s):
@@ -139,7 +152,9 @@ class SocialVisionAgent(VisionDecisionAgent):
                 else observation_type.model_validate(output)
             )
         except Exception as exc:
-            raise DecisionAgentError(f"gesture classification failed: {exc}") from exc
+            raise DecisionAgentError(
+                f"gesture classification failed: {type(exc).__name__}: {exc}"
+            ) from exc
         gesture = observation.gesture
         self._last_observation = observation.model_dump()
         confirmed = (

@@ -148,6 +148,30 @@ void main() {
     expect(controller.logs, isEmpty);
   });
 
+  testWidgets('keeps visual loop busy and displays its decision and outcome', (tester) async {
+    await tester.pump();
+    api.emitState(consolePayload(
+      backend: true,
+      busy: true,
+      cameraSource: 'local',
+      modelStatus: '持续视觉交互',
+      modelOutput: '{"decision":{"skill":"wave","speech":"你好"}}',
+      skillStatus: 'DONE',
+      tools: const [
+        {'name': 'vision.decide', 'payload': '{"frame_count":3}', 'arguments': {}, 'result': {'frame_count': 3}},
+        {'name': 'vision.outcome', 'payload': '{"speech_spoken":true}', 'arguments': {}, 'result': {'speech_spoken': true}},
+      ],
+    ));
+    await tester.pump();
+    expect(controller.busy, isTrue);
+    expect(controller.modelStatus, '持续视觉交互');
+    expect(controller.modelOutput, contains('你好'));
+    expect(controller.tools.map((tool) => tool.name), containsAll(['vision.decide', 'vision.outcome']));
+    await controller.cancelTask('停止视觉交互');
+    expect(api.cancelTaskCalls, 1);
+    expect(controller.busy, isFalse);
+  });
+
   testWidgets('dispose closes the client and ignores later events', (
     tester,
   ) async {

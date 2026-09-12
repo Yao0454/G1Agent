@@ -104,9 +104,7 @@ def create_app(
     @app.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         if console.starting:
-            status: Literal["ready", "stopped", "starting", "degraded"] = (
-                "starting"
-            )
+            status: Literal["ready", "stopped", "starting", "degraded"] = "starting"
         elif console.backend and console.robot_connected:
             status = "ready"
         elif console.backend:
@@ -190,6 +188,8 @@ def create_app(
     async def update_camera_source(body: CameraSourceUpdate) -> ConsoleSnapshot:
         try:
             return await console.set_camera_source(body.source)
+        except TaskConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except PerceptionError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -225,9 +225,7 @@ def create_app(
             )
             while True:
                 event = await queue.get()
-                await websocket.send_json(
-                    event.model_dump(mode="json", by_alias=True)
-                )
+                await websocket.send_json(event.model_dump(mode="json", by_alias=True))
         except WebSocketDisconnect:
             pass
         finally:
@@ -256,6 +254,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)
+    parser.add_argument("--vision-model", default="qwen3.5:9b")
+    parser.add_argument("--vision-url", default="http://127.0.0.1:11435")
+    parser.add_argument(
+        "--vision-rotation-deg", type=int, choices=(0, 90, 180, 270), default=180
+    )
     parser.add_argument("--include-operator-only-skills", action="store_true")
     return parser
 
@@ -276,6 +279,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         camera_width=args.camera_width,
         camera_height=args.camera_height,
         camera_fps=args.camera_fps,
+        vision_model=args.vision_model,
+        vision_url=args.vision_url,
+        vision_rotation_deg=args.vision_rotation_deg,
     )
     uvicorn.run(create_app(config), host=args.host, port=args.port)
 

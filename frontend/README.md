@@ -8,11 +8,17 @@
 - 通过 WebSocket 实时接收状态、日志、心跳和摄像头帧事件
 - 显示 D435i RGB 画面、机器人连接状态和通信延迟
 - 展示 Agent 输出、工具调用和 SkillRuntime 执行进度
+- 本地相机任务接入持续 VideoBuffer → SocialVisionAgent → SkillRuntime，返回视觉决策、抑制原因和 TTS 调用状态
 - 日志等级筛选、搜索、暂停与清空
 - 桌面、平板和手机响应式布局
 
 前端不会直接调用 Unitree SDK。所有动作都经过 FastAPI、`RobotAgent` 和
 `SkillRuntime`；是否连接真机由后端启动参数决定。
+
+其中本地相机任务由 `SocialVisionAgent`/`VisionPolicyWorker` 驱动，不经过文本
+`RobotAgent`：最近0.8秒取3帧，范围为握手、挥手、击掌。系统提示词和任务文字是
+视觉任务偏好，不能取消图像证据与动作安全检查；不支持借此执行任意导航。
+选择模拟视频源则维持一次性文本任务，不会把模拟背景当成真实图像传给VLM。
 
 ## 项目结构
 
@@ -41,6 +47,45 @@ test/
 并保留低频 REST 轮询作为断线容错。
 
 ## 运行方式
+
+### 实时视觉前后端
+
+先停止之前的 `run-remote-vision.sh` 相机进程，避免占用同一个 D435i。
+保持云端 Ollama 服务及原 SSH 隧道运行（已有隧道时不要重复启动）：
+
+```bash
+cd ~/G1Agent
+sh scripts/remote-vision-tunnel.sh
+```
+
+另一个终端启动后端，先使用模拟机器人与真实相机：
+
+```bash
+cd ~/G1Agent
+.venv/bin/python -m app.api --camera-source local \
+  --vision-model qwen3.5:9b --vision-url http://127.0.0.1:11435 --no-audio
+```
+
+前端在同一台主机上可运行 `flutter run -d chrome`。若前端在另一台主机，后端
+需要在受信任局域网监听（`--host 0.0.0.0`），前端传入
+`--dart-define=G1_API_BASE_URL=http://ROBOT_IP:8000`。这是**控制台API地址**，
+不是云端Ollama地址；后者只在后端用 `--vision-url` 配置。
+
+界面选择“本地相机”，填写交互偏好，点击“开始持续视觉交互”。仅打开相机预览不会
+启动动作；提交后持续运行至“停止任务”。`vision.decide` 记录帧时间、决策、模型耗时；
+`vision.outcome` 记录Skill返回值、冷却/过期拦截及 `speech_spoken`。
+TTS成功返回不等于麦克风确认播报完成。模拟后端不连接真实TTS。
+
+相机默认旋转180°，预览与模型使用相同校正后的JPEG；相机正装时传
+`--vision-rotation-deg 0`。深度和HOG检测坐标仍保留原始方向。
+任务期间禁止切换相机或插入手动Skill；模型报错、相机中断或帧过期会停止视觉任务，
+错误显示在界面，可排除故障后重新提交。停止任务会取消worker，但不是物理急停。
+
+实机须先完成现场检查、备好急停，再在后端命令增加 `--hardware --network eth0`，
+需要发声则去掉 `--no-audio`。不要同时运行独立视觉CLI和控制台后端。
+API目前无身份认证，仅限可信网络，不能开放到公网。
+
+### 原文本/模拟流程
 
 先启动默认模拟后端：
 

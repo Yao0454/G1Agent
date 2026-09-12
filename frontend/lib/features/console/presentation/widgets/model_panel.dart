@@ -65,9 +65,11 @@ class ModelPanel extends StatelessWidget {
         children: [
           dot(const Color(0xFFA896DE)),
           const SizedBox(width: 6),
-          const Expanded(
+          Expanded(
             child: Text(
-              'LangChain Agent / Ollama',
+              controller.cameraSource == 'local'
+                  ? 'Video VLM / SkillRuntime'
+                  : 'LangChain Agent / Ollama',
               overflow: TextOverflow.ellipsis,
             ),
           ),

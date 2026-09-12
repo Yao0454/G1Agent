@@ -25,6 +25,7 @@ class SocialVisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.action, "ignore")
         self.assertIsNone(result.speech)
         self.assertIn('"evidence":"none","speech":null', invoker.calls[-1][1])
+        self.assertIn("arm hanging down beside the thigh", invoker.calls[-1][1])
 
     async def test_speaking_action_without_evidence_is_rejected(self):
         agent = SocialVisionAgent(generate_speech=True, invoker=FakeVisionInvoker([dict(

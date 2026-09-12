@@ -7,7 +7,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
@@ -17,8 +17,15 @@ from adapters import AudioOutputError, UnitreeAudioOutput
 from adapters.langchain import SkillToolObserver
 from agent import AgentError, RobotAgent
 from agent.service import SYSTEM_PROMPT
+from agent.social_vision import SocialVisionAgent
+from agent.vision_policy import OllamaVisionInvoker, VisionPolicyWorker
 from core.runtime import SkillRuntime
-from perception import CameraFrame, PerceptionError, RealSensePersonDetector
+from perception import (
+    CameraFrame,
+    PerceptionError,
+    RealSensePersonDetector,
+    VideoBuffer,
+)
 from robot import (
     RobotAdapter,
     RobotCommandError,
@@ -27,6 +34,8 @@ from robot import (
     UnitreeG1Config,
 )
 from skills import register_g1_skills
+
+from .perception import _DepthSafetyGate
 
 
 def _to_camel(value: str) -> str:
@@ -136,6 +145,22 @@ class BackendConfig:
     camera_width: int = 640
     camera_height: int = 480
     camera_fps: int = 30
+    vision_model: str = "qwen3.5:9b"
+    vision_url: str = "http://127.0.0.1:11435"
+    vision_rotation_deg: int = 180
+    vision_max_age_s: float = 5.0
+    vision_window_s: float = 0.8
+    vision_frame_count: int = 3
+
+    def __post_init__(self) -> None:
+        if self.vision_rotation_deg not in (0, 90, 180, 270):
+            raise ValueError("invalid vision rotation")
+        if (
+            self.vision_max_age_s <= 0
+            or self.vision_window_s <= 0
+            or self.vision_frame_count < 2
+        ):
+            raise ValueError("invalid vision window or freshness configuration")
 
 
 class BackendNotRunning(RuntimeError):
@@ -178,6 +203,7 @@ class ConsoleBackend(SkillToolObserver):
         robot: RobotAdapter | None = None,
         agent_factory: AgentFactory | None = None,
         camera_factory: Callable[[], RealSensePersonDetector] | None = None,
+        vision_agent_factory: Callable[[str], SocialVisionAgent] | None = None,
     ) -> None:
         self.config = config or BackendConfig()
         self.hardware_robot: UnitreeG1Adapter | None = None
@@ -201,6 +227,10 @@ class ConsoleBackend(SkillToolObserver):
         )
         self._agent_factory = agent_factory or self._build_agent
         self._camera_factory = camera_factory or self._build_camera
+        self._vision_agent_factory = vision_agent_factory or self._build_vision_agent
+        self._vision_worker: VisionPolicyWorker | None = None
+        self._video_buffer = self._new_video_buffer()
+        self._safety_gate = _DepthSafetyGate()
         self._agent: ChatAgent | None = None
         self._audio: UnitreeAudioOutput | None = None
         self._camera: RealSensePersonDetector | None = None
@@ -241,6 +271,31 @@ class ConsoleBackend(SkillToolObserver):
         self.frame_version = 0
         self.tools: list[ToolCall] = []
         self.logs: list[ConsoleLog] = []
+
+    def _new_video_buffer(self) -> VideoBuffer:
+        return VideoBuffer(
+            window_s=self.config.vision_window_s,
+            max_frames=max(
+                self.config.vision_frame_count,
+                round(self.config.camera_fps * self.config.vision_window_s),
+            ),
+        )
+
+    def _build_vision_agent(self, instruction: str) -> SocialVisionAgent:
+        return SocialVisionAgent(
+            model_name=self.config.vision_model,
+            prompt_profile="egocentric",
+            generate_speech=True,
+            task_context=f"{self.system_prompt}\nCurrent task: {instruction}",
+            timeout_s=120,
+            invoker=OllamaVisionInvoker(
+                self.config.vision_model,
+                base_url=self.config.vision_url,
+                constrain_json=False,
+                max_new_tokens=256,
+                think=False,
+            ),
+        )
 
     def _build_agent(
         self,
@@ -369,6 +424,8 @@ class ConsoleBackend(SkillToolObserver):
         return self.snapshot()
 
     async def set_camera_source(self, source: str) -> ConsoleSnapshot:
+        if self.busy:
+            raise TaskConflict("stop the current task before switching cameras")
         normalized = "local" if source in {"local", "d435i"} else "demo"
         if normalized == self.camera_source and (
             normalized == "demo" or self._camera_task is not None
@@ -424,17 +481,37 @@ class ConsoleBackend(SkillToolObserver):
             await asyncio.to_thread(camera.close)
         if self.camera_source == "local":
             self.camera_status = "idle"
+        self.latest_frame = None
+        self.latest_observation = None
+        self._video_buffer = self._new_video_buffer()
 
     async def _camera_loop(self, camera: RealSensePersonDetector) -> None:
         try:
             while True:
                 frame = await asyncio.to_thread(camera.capture_frame)
-                self.latest_frame = await asyncio.to_thread(self._frame_jpeg, frame)
+                self.latest_frame = await asyncio.to_thread(
+                    self._vision_frame_jpeg, frame
+                )
+                # The preview and model receive the same oriented JPEG bytes.
+                frame = replace(frame, rgb=self.latest_frame)
+                self._video_buffer.push(frame)
+                transition = self._safety_gate.update(frame.nearest_obstacle_distance_m)
+                worker = self._vision_worker
+                if worker is not None:
+                    worker.observe_frame(frame)
+                    worker.set_safety_latched(self._safety_gate.latched)
+                    if transition == "triggered":
+                        await worker.stop_locomotion_for_safety(
+                            "console depth safety stop"
+                        )
+                        await self._log(
+                            "WARN",
+                            "perception.safety",
+                            "深度安全停止：仅限制底盘，非手臂安全保证。",
+                        )
                 self.latest_observation = {
                     **frame.observation.to_dict(),
-                    "nearest_obstacle_distance_m": (
-                        frame.nearest_obstacle_distance_m
-                    ),
+                    "nearest_obstacle_distance_m": (frame.nearest_obstacle_distance_m),
                 }
                 self.frame_version += 1
                 self.camera_status = "ready"
@@ -451,8 +528,25 @@ class ConsoleBackend(SkillToolObserver):
         except Exception as exc:  # noqa: BLE001 - keep the camera worker alive
             self.camera_status = "error"
             self.camera_error = str(exc)
+            self.latest_frame = None
             await self._log("ERROR", "camera", f"D435i 采集失败：{exc}")
             self._emit_state()
+
+    def _vision_frame_jpeg(self, frame: CameraFrame) -> bytes:
+        data = self._frame_jpeg(frame)
+        if not self.config.vision_rotation_deg:
+            return data
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            image = image.convert("RGB").rotate(
+                -self.config.vision_rotation_deg, expand=True
+            )
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=90)
+            return output.getvalue()
 
     @staticmethod
     def _frame_jpeg(frame: CameraFrame) -> bytes:
@@ -487,6 +581,8 @@ class ConsoleBackend(SkillToolObserver):
                 raise TaskConflict("another task is already running")
             if camera_source is not None:
                 await self.set_camera_source(camera_source)
+            if self.camera_source == "local" and self.camera_status != "ready":
+                raise PerceptionError("本地相机未就绪，不能启动视觉任务")
             self.task_id = uuid.uuid4().hex
             self.busy = True
             self.current_task = instruction
@@ -510,6 +606,9 @@ class ConsoleBackend(SkillToolObserver):
     async def _run_task(self, task_id: str, instruction: str) -> None:
         started = time.monotonic()
         try:
+            if self.camera_source == "local":
+                await self._run_vision_task(instruction)
+                return
             camera_result = {
                 "source": self.camera_source,
                 "mode": "d435i" if self.camera_source == "local" else "simulated",
@@ -520,7 +619,9 @@ class ConsoleBackend(SkillToolObserver):
                 ),
                 "observation": self.latest_observation,
             }
-            self._record_tool("camera.get_frame", {"source": self.camera_source}, camera_result)
+            self._record_tool(
+                "camera.get_frame", {"source": self.camera_source}, camera_result
+            )
             await self._log("INFO", "tools", "camera.get_frame → 返回成功")
             self.progress = 40
             self.progress_text = "正在规划任务"
@@ -577,6 +678,104 @@ class ConsoleBackend(SkillToolObserver):
             if self._active_task is asyncio.current_task():
                 self._active_task = None
             self._emit_state()
+
+    async def _run_vision_task(self, instruction: str) -> None:
+        """Continuous, cancellable vision task, reusing the CLI execution boundary."""
+        agent = self._vision_agent_factory(instruction)
+        worker = VisionPolicyWorker(
+            self.runtime,
+            agent,
+            self._video_buffer,
+            speech=self._audio,
+            frame_count=self.config.vision_frame_count,
+            max_decision_age_s=self.config.vision_max_age_s,
+            interval_s=0.5,
+        )
+        self._vision_worker = worker
+        try:
+            self.model_status = "加载视觉模型"
+            self.model_output = f"视觉交互 · {self.config.vision_model}\n任务：{instruction}\n持续运行，点击停止任务结束。"
+            self._emit_state()
+            await agent.warmup()
+            worker.set_safety_latched(self._safety_gate.latched)
+            # Wait for the initial window, but never start on an unavailable camera.
+            deadline = time.monotonic() + self.config.vision_max_age_s
+            while (
+                len(self._video_buffer) < 2
+                and self.camera_status == "ready"
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.05)
+            await self._check_vision_camera()
+            await worker.start()
+            self.task_count += 1
+            await self._log(
+                "INFO",
+                "vision",
+                "已接入实时RGB窗口与SkillRuntime；范围：握手/挥手/击掌。",
+            )
+            while True:
+                await self._check_vision_camera()
+                self.model_status = "持续视觉交互"
+                self.progress_text = "正在观察手势 · 停止任务可结束"
+                self.skill_name = (
+                    "执行视觉技能" if worker.active_behavior else "等待确认手势"
+                )
+                self.progress = 40
+                self.active_step = 1
+                for record in worker.drain_policy_decisions():
+                    payload = record.to_dict()
+                    payload["input_preprocessing"] = {
+                        "rotation_deg": self.config.vision_rotation_deg
+                    }
+                    self._record_tool(
+                        "vision.decide", {"instruction": instruction}, payload
+                    )
+                    self.model_output = json.dumps(
+                        payload, ensure_ascii=False, indent=2, default=str
+                    )
+                    self.model_duration_s = (
+                        float(record.model_metrics.get("round_trip_s", 0))
+                        if record.model_metrics
+                        else 0
+                    )
+                    self.skill_status = "RUNNING" if worker.active_behavior else "IDLE"
+                for outcome in worker.drain_outcomes():
+                    self._record_tool("vision.outcome", {}, outcome.to_dict())
+                    if outcome.skill_result is not None:
+                        await self.after_skill(
+                            outcome.decision.skill or "vision",
+                            outcome.decision.arguments,
+                            outcome.skill_result.to_dict(),
+                        )
+                        await self._log(
+                            "INFO", "audio", f"TTS调用成功返回：{outcome.speech_spoken}"
+                        )
+                    elif outcome.suppressed_reason:
+                        await self._log("INFO", "vision", outcome.suppressed_reason)
+                errors = worker.drain_errors()
+                if errors:
+                    raise RuntimeError(
+                        f"视觉任务错误：{errors[0].stage}: {errors[0].message}"
+                    )
+                self._emit_state()
+                await asyncio.sleep(0.2)
+        finally:
+            try:
+                await worker.stop()
+            finally:
+                self._vision_worker = None
+                await agent.close()
+
+    async def _check_vision_camera(self) -> None:
+        frames = self._video_buffer.sample(1)
+        if (
+            self.camera_status != "ready"
+            or not frames
+            or time.monotonic() - frames[-1].observed_at_s
+            > self.config.vision_max_age_s
+        ):
+            raise PerceptionError("相机中断或画面过期，视觉任务已停止")
 
     async def cancel_task(self, reason: str = "用户停止了任务") -> ConsoleSnapshot:
         task = self._active_task

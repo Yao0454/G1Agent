@@ -75,7 +75,7 @@ class CameraPanel extends StatelessWidget {
                     if (liveCamera)
                       Image.network(
                         controller.cameraFrameUrl,
-                        key: ValueKey(controller.cameraFrameVersion),
+                        key: const ValueKey('live-camera-frame'),
                         fit: BoxFit.cover,
                         gaplessPlayback: true,
                         errorBuilder: (context, error, stackTrace) =>
@@ -87,7 +87,8 @@ class CameraPanel extends StatelessWidget {
                               ),
                             ),
                       ),
-                    CustomPaint(painter: CameraGridPainter()),
+                    if (!liveCamera)
+                      CustomPaint(painter: CameraGridPainter()),
                     if (!liveCamera)
                       Center(
                         child: Column(

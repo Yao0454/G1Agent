@@ -31,8 +31,10 @@ class TaskInputPanel extends StatelessWidget {
                 fontSize: 13,
                 height: 1.5,
               ),
-              decoration: const InputDecoration(
-                hintText: '你想让机器人做什么？\n例如：观察前方环境，识别障碍物。',
+              decoration: InputDecoration(
+                hintText: controller.cameraSource == 'local'
+                    ? '持续观察真实画面，回应握手、挥手或击掌。\n例如：有人向我挥手时，用中文回应。'
+                    : '输入文本任务（模拟视频不会发送给视觉模型）。',
                 fillColor: Colors.white,
               ),
             ),
@@ -46,8 +48,12 @@ class TaskInputPanel extends StatelessWidget {
               spacing: 6,
               runSpacing: 6,
               children: [
-                _suggestion('观察环境', '观察前方环境，识别障碍物。'),
-                _suggestion('向前移动', '向前移动 1 米，遇到障碍物停止。'),
+                if (controller.cameraSource == 'local')
+                  _suggestion('视觉交互', '持续观察手势，确认握手、挥手或击掌后回应，并简短说话。')
+                else ...[
+                  _suggestion('观察环境', '观察前方环境，识别障碍物。'),
+                  _suggestion('向前移动', '向前移动 1 米，遇到障碍物停止。'),
+                ],
                 _suggestion('挥手问好', '向我挥手打个招呼。'),
               ],
             ),
@@ -64,7 +70,7 @@ class TaskInputPanel extends StatelessWidget {
                     : null,
                 iconAlignment: IconAlignment.end,
                 icon: const Icon(Icons.send_outlined, size: 16),
-                label: const Text('发送指令'),
+                label: Text(controller.cameraSource == 'local' ? '开始持续视觉交互' : '发送指令'),
                 style: FilledButton.styleFrom(
                   backgroundColor: ConsoleColors.blue,
                   disabledBackgroundColor: const Color(0xFFA5BAE8),
@@ -81,6 +87,8 @@ class TaskInputPanel extends StatelessWidget {
                     ? '请先启动后端服务'
                     : controller.busy
                     ? '任务执行中，可按 Esc 停止'
+                    : controller.cameraSource == 'local'
+                    ? '仅握手 / 挥手 / 击掌；持续运行至停止，不支持自由导航'
                     : 'Ctrl / ⌘ + Enter 发送指令',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Color(0xFFA5AFBE), fontSize: 11),

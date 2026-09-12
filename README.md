@@ -1,5 +1,22 @@
 # G1 Agent
 
+## 控制台视觉接入（2026-09-12）
+
+Flutter控制台已接入原有滑动视频策略。后端选择本地相机时，提交任务启动持续视觉
+交互（握手/挥手/击掌），而不是仅把任务文字送给文本Agent。相机预览与模型共享
+旋转后的JPEG，决策、Skill结果与TTS状态通过现有REST/WebSocket快照展示。
+模拟视频源仍为原文本任务。详见 [前端运行说明](frontend/README.md)。
+
+```bash
+# 原云端Ollama服务和SSH隧道需保持运行；此命令不驱动机器人
+.venv/bin/python -m app.api --camera-source local \
+  --vision-model qwen3.5:9b --vision-url http://127.0.0.1:11435 --no-audio
+```
+
+不要同时启动占用同一相机的 `run-remote-vision.sh`。前端点击“开始持续视觉交互”才会
+启动决策；停止任务会结束worker。连接真机由后端 `--hardware --network eth0` 决定，
+软件停止不是物理急停，API仅用于可信网络。
+
 一个以 Robot Skill Runtime 为执行边界的 Unitree G1 Agent。文本、麦克风和视觉
 事件都不能直接分发机器人动作；所有动作最终只能通过 SkillRuntime 执行。
 
@@ -243,6 +260,11 @@ Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播�
 远程脚本现在默认 `--vision-generate-speech`：模型在同一次视觉判断中生成手势字段与
 简短中文 `speech`，本地校验后组合成 `execute_and_speak`。不是固定话术，也没有新增
 语音输入。实机通过 Unitree AudioClient TTS 播报，模拟模式仅在日志显示文字。
+2026-09-12 带语音回归：补充六字段完整输出及“走近、手臂下垂不是握手”的说明后，
+同一23窗口回放动作选择23/23、无格式错误、无无动作场景误触发；该集已用于调试，
+不是独立准确率评测。结果保存于 `debug/vision/eval-speaking-20260912-v2-retry.jsonl`。
+该次云端往返中位数6.826秒，部分响应中 `load_s` 占主要耗时，实时性能尚待排查；
+不要提高动作时效上限来绕过过期拦截。
 当前执行顺序为 Skill 返回后再播报（不是动作与声音同步开始）；动作失败不播报。
 相同动作即使文字不同也共享冷却限制，未确认或正在进行的动作不重复说话。
 增加 `--no-audio` 可静音但保留模型生成文字。日志 `speech_spoken=true` 表示 TTS 调用
