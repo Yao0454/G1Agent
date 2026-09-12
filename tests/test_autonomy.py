@@ -17,7 +17,8 @@ from agent import (
     EventDecisionAgent,
     build_decision_system_prompt,
 )
-from core.models import SkillArgs
+from core.context import SkillContext
+from core.models import SkillArgs, SkillMetadata, SkillResult
 from core.runtime import SkillRuntime
 from core.skill import RobotSkill
 from perception import PerceptionResult, WorldEvent, WorldEventType, WorldState
@@ -299,6 +300,59 @@ class AutonomousDecisionLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech.messages, ["你好！"])
         self.assertEqual(len(agent.calls), 1)
         self.assertFalse(agent.calls[0][1]["person_greeted"])
+
+    async def test_execute_and_speak_runs_action_and_speech_concurrently(self) -> None:
+        action_started = asyncio.Event()
+        speech_started = asyncio.Event()
+
+        class CoordinatedArgs(SkillArgs):
+            pass
+
+        class CoordinatedSkill(RobotSkill[CoordinatedArgs]):
+            metadata = SkillMetadata(
+                name="coordinated_action",
+                description="Test concurrent action and speech.",
+            )
+            args_model = CoordinatedArgs
+
+            async def execute(
+                self,
+                ctx: SkillContext,
+                args: CoordinatedArgs,
+            ) -> SkillResult:
+                action_started.set()
+                await speech_started.wait()
+                return SkillResult.ok()
+
+        class CoordinatedSpeech:
+            async def speak(self, text: str) -> None:
+                speech_started.set()
+                await action_started.wait()
+
+        runtime = SkillRuntime(SimulatedRobotAdapter())
+        runtime.register(CoordinatedSkill())
+        loop = AutonomousDecisionLoop(
+            runtime,
+            ScriptedDecisionAgent(),
+            speech=CoordinatedSpeech(),
+        )
+
+        outcome = await asyncio.wait_for(
+            loop._execute(
+                WorldEvent(type=WorldEventType.PERSON_LEFT, timestamp_s=1.0),
+                AgentDecision(
+                    action="execute_and_speak",
+                    skill="coordinated_action",
+                    speech="你好",
+                ),
+            ),
+            timeout=0.2,
+        )
+
+        self.assertTrue(outcome.skill_result and outcome.skill_result.success)
+        self.assertTrue(outcome.speech_spoken)
+        self.assertTrue(action_started.is_set())
+        self.assertTrue(speech_started.is_set())
 
     async def test_too_close_person_selects_bounded_backward_skill(self) -> None:
         loop, robot, agent, speech = self.build_loop()

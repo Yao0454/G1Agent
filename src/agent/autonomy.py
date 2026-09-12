@@ -193,20 +193,58 @@ class AutonomousDecisionLoop:
             )
 
         skill_result: SkillResult | None = None
-        if decision.action in {"execute_skill", "execute_and_speak"}:
+        speech_spoken = False
+        if decision.action == "execute_and_speak":
+            if decision.skill is None:
+                raise RuntimeError("validated decision is missing a skill")
+            if decision.speech is None:
+                raise RuntimeError("validated decision is missing speech")
+            if self.speech is None:
+                skill_result = await self.runtime.execute(
+                    decision.skill,
+                    **decision.arguments,
+                )
+            else:
+                skill_task = asyncio.create_task(
+                    self.runtime.execute(
+                        decision.skill,
+                        **decision.arguments,
+                    ),
+                    name="autonomy-skill-execution",
+                )
+                speech_task = asyncio.create_task(
+                    self.speech.speak(decision.speech),
+                    name="autonomy-speech-output",
+                )
+                skill_outcome, speech_outcome = await asyncio.gather(
+                    skill_task,
+                    speech_task,
+                    return_exceptions=True,
+                )
+                if isinstance(skill_outcome, BaseException):
+                    raise skill_outcome
+                if isinstance(speech_outcome, BaseException):
+                    raise speech_outcome
+                skill_result = skill_outcome
+                speech_spoken = True
+        elif decision.action == "execute_skill":
             if decision.skill is None:
                 raise RuntimeError("validated decision is missing a skill")
             skill_result = await self.runtime.execute(
                 decision.skill,
                 **decision.arguments,
             )
-            if skill_result.success and decision.skill == "wave":
-                async with self._lock:
-                    if self.world_state.person_visible:
-                        self.world_state.mark_greeted()
 
-        speech_spoken = False
-        if decision.action in {"speak", "execute_and_speak"}:
+        if (
+            skill_result is not None
+            and skill_result.success
+            and decision.skill == "wave"
+        ):
+            async with self._lock:
+                if self.world_state.person_visible:
+                    self.world_state.mark_greeted()
+
+        if decision.action == "speak":
             if decision.speech is None:
                 raise RuntimeError("validated decision is missing speech")
             if self.speech is not None:

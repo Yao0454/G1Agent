@@ -13,7 +13,10 @@ from agent import (
     VisionPolicyWorker,
 )
 from agent.vision_policy import _skill_catalog_payload
+from core.context import SkillContext
+from core.models import SkillArgs, SkillMetadata, SkillResult
 from core.runtime import SkillRuntime
+from core.skill import RobotSkill
 from perception import CameraFrame, PerceptionResult, VideoBuffer
 from robot import RobotState, SimulatedRobotAdapter
 from skills.motions import HandshakeSkill, MoveBackwardSkill, WaveHandSkill, WaveSkill
@@ -246,6 +249,59 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_and_speak_runs_action_and_speech_concurrently(self) -> None:
+        action_started = asyncio.Event()
+        speech_started = asyncio.Event()
+
+        class CoordinatedArgs(SkillArgs):
+            pass
+
+        class CoordinatedSkill(RobotSkill[CoordinatedArgs]):
+            metadata = SkillMetadata(
+                name="coordinated_action",
+                description="Test concurrent action and speech.",
+            )
+            args_model = CoordinatedArgs
+
+            async def execute(
+                self,
+                ctx: SkillContext,
+                args: CoordinatedArgs,
+            ) -> SkillResult:
+                action_started.set()
+                await speech_started.wait()
+                return SkillResult.ok()
+
+        class CoordinatedSpeech:
+            async def speak(self, text: str) -> None:
+                speech_started.set()
+                await action_started.wait()
+
+        runtime = SkillRuntime(SimulatedRobotAdapter())
+        runtime.register(CoordinatedSkill())
+        worker = VisionPolicyWorker(
+            runtime,
+            VisionDecisionAgent(invoker=FakeVisionInvoker([{"action": "ignore"}])),
+            VideoBuffer(window_s=2.0, max_frames=60),
+            speech=CoordinatedSpeech(),
+        )
+
+        skill_result, speech_spoken = await asyncio.wait_for(
+            worker._execute(
+                AgentDecision(
+                    action="execute_and_speak",
+                    skill="coordinated_action",
+                    speech="你好",
+                )
+            ),
+            timeout=0.2,
+        )
+
+        self.assertTrue(skill_result and skill_result.success)
+        self.assertTrue(speech_spoken)
+        self.assertTrue(action_started.is_set())
+        self.assertTrue(speech_started.is_set())
+
     async def test_recovered_handshake_requires_recent_close_depth(self) -> None:
         robot = SimulatedRobotAdapter()
         runtime = SkillRuntime(robot)

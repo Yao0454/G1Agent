@@ -1021,8 +1021,44 @@ class VisionPolicyWorker:
                 )
 
     async def _execute(self, decision: AgentDecision) -> tuple[SkillResult | None, bool]:
+        if decision.action == "execute_and_speak":
+            if decision.skill is None:
+                raise RuntimeError("validated vision decision is missing a skill")
+            if decision.speech is None:
+                raise RuntimeError("validated vision decision is missing speech")
+            if self.speech is None:
+                return (
+                    await self.runtime.execute(
+                        decision.skill,
+                        **decision.arguments,
+                    ),
+                    False,
+                )
+
+            skill_task = asyncio.create_task(
+                self.runtime.execute(
+                    decision.skill,
+                    **decision.arguments,
+                ),
+                name="vision-skill-execution",
+            )
+            speech_task = asyncio.create_task(
+                self.speech.speak(decision.speech),
+                name="vision-speech-output",
+            )
+            skill_outcome, speech_outcome = await asyncio.gather(
+                skill_task,
+                speech_task,
+                return_exceptions=True,
+            )
+            if isinstance(skill_outcome, BaseException):
+                raise skill_outcome
+            if isinstance(speech_outcome, BaseException):
+                raise speech_outcome
+            return skill_outcome, True
+
         skill_result: SkillResult | None = None
-        if decision.action in {"execute_skill", "execute_and_speak"}:
+        if decision.action == "execute_skill":
             if decision.skill is None:
                 raise RuntimeError("validated vision decision is missing a skill")
             skill_result = await self.runtime.execute(
@@ -1030,10 +1066,10 @@ class VisionPolicyWorker:
                 **decision.arguments,
             )
         speech_spoken = False
-        if decision.action in {"speak", "execute_and_speak"}:
+        if decision.action == "speak":
             if decision.speech is None:
                 raise RuntimeError("validated vision decision is missing speech")
-            if self.speech is not None and (skill_result is None or skill_result.success):
+            if self.speech is not None:
                 await self.speech.speak(decision.speech)
                 speech_spoken = True
         return skill_result, speech_spoken
