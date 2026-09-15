@@ -8,6 +8,8 @@ from collections.abc import Sequence
 
 from agent import (
     AgentDecision,
+    DecisionAgentError,
+    TemporalVisionStateUpdate,
     VisionDecisionAgent,
     VisionPolicyDecision,
     VisionPolicyWorker,
@@ -62,18 +64,97 @@ class VideoBufferTests(unittest.TestCase):
 
         sampled = buffer.sample(4)
 
-        self.assertEqual([frame.observed_at_s for frame in sampled], [0.0, 3.0, 6.0, 9.0])
+        self.assertEqual(
+            [frame.observed_at_s for frame in sampled], [0.0, 3.0, 6.0, 9.0]
+        )
 
 
 class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_temporal_state_is_carried_into_the_next_window(self) -> None:
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "decision": {"action": "ignore"},
+                    "state_update": {
+                        "scene_summary": "一名访客站在机器人前方",
+                        "human_intent": "正在挥手打招呼",
+                        "interaction_state": "已识别问候，等待机器人回应",
+                        "last_observation": "访客完成了一次挥手",
+                    },
+                },
+                {
+                    "decision": {"action": "ignore"},
+                    "state_update": {},
+                },
+            ]
+        )
+        agent = VisionDecisionAgent(invoker=invoker)
+        state = RobotState(hardware=False, connected=True)
+
+        await agent.decide([camera_frame(1.0)], state, [])
+        await agent.decide([camera_frame(3.0)], state, [])
+
+        self.assertEqual(agent.temporal_state.human_intent, "正在挥手打招呼")
+        self.assertIn('"temporal_vision_state"', invoker.calls[1][1])
+        self.assertIn(
+            '"interaction_state": "已识别问候，等待机器人回应"', invoker.calls[1][1]
+        )
+
+    async def test_invalid_state_update_rejects_response_without_mutating_memory(
+        self,
+    ) -> None:
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "decision": {"action": "ignore"},
+                    "state_update": {"scene_summary": "初始场景"},
+                },
+                {
+                    "decision": {"action": "execute_skill", "skill": "wave"},
+                    "state_update": {"last_action": "伪造已执行动作"},
+                },
+            ]
+        )
+        agent = VisionDecisionAgent(invoker=invoker)
+        state = RobotState(hardware=False, connected=True)
+        runtime = SkillRuntime(SimulatedRobotAdapter())
+        runtime.register(WaveSkill())
+
+        await agent.decide([camera_frame(1.0)], state, runtime.registry.list())
+        with self.assertRaises(DecisionAgentError):
+            await agent.decide(
+                [camera_frame(2.0)],
+                state,
+                runtime.registry.list(),
+            )
+
+        self.assertEqual(agent.temporal_state.scene_summary, "初始场景")
+        self.assertIsNone(agent.temporal_state.last_action)
+
+    def test_temporal_response_parser_keeps_legacy_decisions_compatible(self) -> None:
+        response = VisionDecisionAgent._parse_response({"action": "ignore"})
+
+        self.assertEqual(response.decision.action, "ignore")
+        self.assertEqual(response.state_update, TemporalVisionStateUpdate())
+
     def test_different_generated_speech_cannot_bypass_action_cooldown(self):
         first = AgentDecision(action="execute_and_speak", skill="wave", speech="你好")
-        second = AgentDecision(action="execute_and_speak", skill="wave", speech="很高兴见到你")
+        second = AgentDecision(
+            action="execute_and_speak", skill="wave", speech="很高兴见到你"
+        )
         silent = AgentDecision(action="execute_skill", skill="wave")
-        self.assertEqual(VisionPolicyWorker._decision_signature(first), VisionPolicyWorker._decision_signature(second))
-        self.assertEqual(VisionPolicyWorker._decision_signature(first), VisionPolicyWorker._decision_signature(silent))
+        self.assertEqual(
+            VisionPolicyWorker._decision_signature(first),
+            VisionPolicyWorker._decision_signature(second),
+        )
+        self.assertEqual(
+            VisionPolicyWorker._decision_signature(first),
+            VisionPolicyWorker._decision_signature(silent),
+        )
 
-    async def test_video_frames_and_runtime_context_produce_agent_decision(self) -> None:
+    async def test_video_frames_and_runtime_context_produce_agent_decision(
+        self,
+    ) -> None:
         invoker = FakeVisionInvoker(
             [
                 json.dumps(
@@ -312,6 +393,44 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_successful_execution_records_last_action_in_temporal_state(
+        self,
+    ) -> None:
+        robot = SimulatedRobotAdapter()
+        runtime = SkillRuntime(robot)
+        runtime.register(WaveSkill())
+        buffer = VideoBuffer(window_s=2.0, max_frames=60)
+        buffer.push(camera_frame(time.monotonic()))
+        invoker = FakeVisionInvoker(
+            [
+                {
+                    "decision": {
+                        "action": "execute_skill",
+                        "skill": "wave",
+                        "arguments": {"arm": "right"},
+                    },
+                    "state_update": {"interaction_state": "正在回应访客挥手"},
+                },
+                {"decision": {"action": "ignore"}, "state_update": {}},
+            ]
+        )
+        agent = VisionDecisionAgent(invoker=invoker)
+        worker = VisionPolicyWorker(
+            runtime,
+            agent,
+            buffer,
+            interval_s=0.01,
+        )
+
+        await worker.start()
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            await worker.stop()
+
+        self.assertIn(("wave", "right"), robot.events)
+        self.assertEqual(agent.temporal_state.last_action, "execute_skill:wave")
+
     async def test_execution_drops_action_that_ages_in_queue(self) -> None:
         robot = SimulatedRobotAdapter()
         runtime = SkillRuntime(robot)
@@ -429,7 +548,9 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("arm_action", [event[0] for event in robot.events])
         self.assertTrue(worker.drain_errors())
 
-    async def test_recent_close_depth_cannot_authorize_malformed_handshake(self) -> None:
+    async def test_recent_close_depth_cannot_authorize_malformed_handshake(
+        self,
+    ) -> None:
         robot = SimulatedRobotAdapter()
         runtime = SkillRuntime(robot)
         runtime.register(HandshakeSkill())
@@ -539,10 +660,12 @@ class VisionPolicyWorkerTests(unittest.IsolatedAsyncioTestCase):
             await worker.stop()
 
         self.assertNotIn("arm_action", [event[0] for event in robot.events])
-        self.assertTrue(any(
-            "stale visual decision" in (outcome.suppressed_reason or "")
-            for outcome in worker.drain_outcomes()
-        ))
+        self.assertTrue(
+            any(
+                "stale visual decision" in (outcome.suppressed_reason or "")
+                for outcome in worker.drain_outcomes()
+            )
+        )
 
     async def test_depth_safety_latch_blocks_mobile_base_skill(self) -> None:
         robot = SimulatedRobotAdapter()

@@ -256,9 +256,10 @@ Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播�
 
 ### 4090D 远程推理
 
-远程脚本现在默认 `--vision-generate-speech`：模型在同一次视觉判断中生成手势字段与
-简短中文 `speech`，本地校验后组合成 `execute_and_speak`。不是固定话术，也没有新增
-语音输入。实机通过 Unitree AudioClient TTS 播报，模拟模式仅在日志显示文字。
+远程脚本现在默认 `--vision-generate-speech`：模型在同一次视觉判断中生成手势字段、
+简短中文 `speech` 与 `state_update`，本地校验后组合成 `execute_and_speak`。不是固定
+话术，也没有新增语音输入。实机通过 Unitree AudioClient TTS 播报，模拟模式仅在日志
+显示文字。
 2026-09-12 带语音回归：补充六字段完整输出及“走近、手臂下垂不是握手”的说明后，
 同一23窗口回放动作选择23/23、无格式错误、无无动作场景误触发；该集已用于调试，
 不是独立准确率评测。结果保存于 `debug/vision/eval-speaking-20260912-v2-retry.jsonl`。
@@ -269,6 +270,42 @@ Agent 的最终文字回复通过 `AudioClient.tts_maker(text, speaker_id)` 播�
 未确认或正在进行的动作不重复说话。
 增加 `--no-audio` 可静音但保留模型生成文字。日志 `speech_spoken=true` 表示 TTS 调用
 成功返回，不代表已通过麦克风验证声音播放完成。
+
+远程视觉策略在每个视觉任务内维护一个有长度上限的 `TemporalVisionState`：
+
+```text
+最近视频窗口 + Robot State + Active Skill + Previous Decision
+               + TemporalVisionState
+                         ↓
+                       VLM
+                         ↓
+                Decision + State Update
+                         ↓
+              下一视频窗口继续使用
+```
+
+状态只保存 `scene_summary`、`human_intent`、`interaction_state`、
+`last_observation`、本地确认的 `last_action` 和更新时间。远端模型只能更新前四个描述
+字段，不能写入本地时间或伪造已执行动作；`last_action` 只在 Skill/TTS/interrupt 实际
+成功后由机器人端记录。新视觉任务使用新 Agent 实例，因此不会把上一个任务的认知状态
+带入下一个任务。本地深度安全、Robot State 和 SkillRuntime 仍是事实与安全边界，
+`TemporalVisionState` 只用于跨滚动窗口保持短期交互上下文。
+
+通用视觉策略的新响应格式为：
+
+```json
+{
+  "decision": {"action": "ignore"},
+  "state_update": {
+    "scene_summary": "一名访客站在机器人前方",
+    "interaction_state": "机器人已经回应过对方的挥手"
+  }
+}
+```
+
+为兼容已有抓帧回放，机器人端仍接受旧的裸 `AgentDecision`，但新的提示词和约束 Schema
+均要求 `decision + state_update`。视觉决策日志和前端 `vision.decide` 结果会包含合并后的
+`temporal_state`，可用于检查跨窗口状态是否连续。
 
 远端 `g1-vision-ollama.service` 是当前用户的临时 systemd 服务，监听
 `127.0.0.1:11435`，远程脚本默认模型为 `qwen3.5:9b`，使用 `egocentric` 第一视角

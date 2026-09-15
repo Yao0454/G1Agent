@@ -11,6 +11,11 @@ from .decision import (
     build_decision_system_prompt,
 )
 from .service import AgentError, AgentInvoker, RobotAgent
+from .temporal_state import (
+    TemporalVisionState,
+    TemporalVisionStateUpdate,
+    VisionDecisionResponse,
+)
 from .vision_policy import (
     DEFAULT_VISION_GOAL,
     DEFAULT_VISION_MODEL,
@@ -40,8 +45,11 @@ __all__ = [
     "EventDecisionAgent",
     "OllamaVisionInvoker",
     "RobotAgent",
+    "TemporalVisionState",
+    "TemporalVisionStateUpdate",
     "TransformersVisionInvoker",
     "VisionDecisionAgent",
+    "VisionDecisionResponse",
     "VisionModelInvoker",
     "VisionPolicyDecision",
     "VisionPolicyError",

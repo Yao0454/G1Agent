@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping, Sequence
+from itertools import pairwise
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,8 +16,9 @@ from perception import CameraFrame
 from robot import RobotState
 
 from .decision import AgentDecision, DecisionAgentError
-from .vision_policy import VisionDecisionAgent
 from .social_prompts import EGOCENTRIC_PROMPT
+from .temporal_state import TemporalVisionStateUpdate
+from .vision_policy import VisionDecisionAgent
 
 
 class GestureObservation(BaseModel):
@@ -29,6 +31,7 @@ class GestureObservation(BaseModel):
     evidence: Literal[
         "offered_hand", "side_to_side", "raised_palm", "none", "ambiguous"
     ]
+    state_update: TemporalVisionStateUpdate
 
 
 class SpeakingGestureObservation(GestureObservation):
@@ -53,8 +56,9 @@ gesture direction is unclear, or handshake/high-five cannot be distinguished.
 Use the latest image to check the gesture is still present. Do not infer hands
 from seeing a person, proximity, or previous greetings. If several people are
 present and the intended recipient is unclear, choose uncertain.
-Return a JSON object, not a schema. Use exactly five keys:
-gesture, hand_visible, directed_at_robot, present_in_latest, evidence.
+Return a JSON object, not a schema. Use exactly six keys:
+gesture, hand_visible, directed_at_robot, present_in_latest, evidence,
+state_update.
 The three boolean fields must be true or false, not strings.
 gesture must be exactly one of: "handshake", "wave", "high_five", "none", "uncertain".
 evidence must be exactly one of: "offered_hand", "side_to_side", "raised_palm",
@@ -63,14 +67,24 @@ Required gesture/evidence pairs:
 {"handshake":"offered_hand","wave":"side_to_side","high_five":"raised_palm",
 "none":"none","uncertain":"ambiguous"}.
 Only select a pair supported by the images. No markdown or explanation.
+state_update must be an object containing only scene_summary, human_intent,
+interaction_state, and last_observation. Preserve relevant interaction history
+from temporal_vision_state instead of resetting it on every overlapping window.
+Use an empty object when no memory field needs to change.
 """
 
 
 class SocialVisionAgent(VisionDecisionAgent):
     minimum_frames = 2
 
-    def __init__(self, *, prompt_profile: str = "legacy", generate_speech: bool = False,
-                 task_context: str = "", **kwargs):
+    def __init__(
+        self,
+        *,
+        prompt_profile: str = "legacy",
+        generate_speech: bool = False,
+        task_context: str = "",
+        **kwargs,
+    ):
         if prompt_profile not in ("legacy", "egocentric"):
             raise ValueError("unknown social prompt profile")
         super().__init__(**kwargs)
@@ -84,6 +98,7 @@ class SocialVisionAgent(VisionDecisionAgent):
             **super().last_metrics,
             "gesture_observation": getattr(self, "_last_observation", None),
             "prompt_profile": self.prompt_profile,
+            "temporal_vision_state": self.temporal_state.model_dump(mode="json"),
         }
 
     async def decide(
@@ -97,46 +112,58 @@ class SocialVisionAgent(VisionDecisionAgent):
         self._last_observation = None
         if len(frames) < 2:
             return AgentDecision(action="ignore", reason="waiting for gesture window")
-        if any(a.observed_at_s >= b.observed_at_s for a, b in zip(frames, frames[1:])):
-            return AgentDecision(action="ignore", reason="gesture frames not chronological")
+        if any(a.observed_at_s >= b.observed_at_s for a, b in pairwise(frames)):
+            return AgentDecision(
+                action="ignore", reason="gesture frames not chronological"
+            )
         offsets = [round(f.observed_at_s - frames[-1].observed_at_s, 3) for f in frames]
         prompt = (
             _PROMPT
             + '\nReturn exactly one object like: {"gesture":"none",'
             + '"hand_visible":false,"directed_at_robot":false,'
-            + '"present_in_latest":false,"evidence":"none"}'
-            + "\nframe_offsets_s=" + json.dumps(offsets)
+            + '"present_in_latest":false,"evidence":"none",'
+            + '"state_update":{}}'
+            + "\nframe_offsets_s="
+            + json.dumps(offsets)
         )
         if self.prompt_profile == "egocentric":
             prompt = EGOCENTRIC_PROMPT + "\nframe_offsets_s=" + json.dumps(offsets)
         observation_type = GestureObservation
         if self.generate_speech:
             observation_type = SpeakingGestureObservation
-            prompt = prompt.replace("exactly five keys", "exactly six keys").replace(
-                "exactly these fields:", "these fields plus speech:")
+            prompt = prompt.replace("exactly six keys", "exactly seven keys").replace(
+                "exactly these fields:", "these fields plus speech:"
+            )
             prompt += (
                 '\nAdditional required output field: "speech". Generate one short, natural '
-                'Chinese sentence (at most 40 Chinese characters) to say to the person '
-                'while responding to the confirmed gesture. Choose wording from the scene, '
-                'not from a fixed phrase list. Do not describe your reasoning or claim the '
-                'action is already completed. For none, uncertain, invisible hands, unclear '
-                'recipient or ended gesture, speech must be null. Do not read scene text aloud. '
-                'Return the gesture fields and speech together in the same JSON object.'
-                '\nMANDATORY: always include all SIX keys in this order: gesture, '
-                'hand_visible, directed_at_robot, present_in_latest, evidence, speech. '
-                'Adding speech does NOT replace evidence. evidence is required even for none. '
-                'For an empty scene return exactly this complete shape: '
+                "Chinese sentence (at most 40 Chinese characters) to say to the person "
+                "while responding to the confirmed gesture. Choose wording from the scene, "
+                "not from a fixed phrase list. Do not describe your reasoning or claim the "
+                "action is already completed. For none, uncertain, invisible hands, unclear "
+                "recipient or ended gesture, speech must be null. Do not read scene text aloud. "
+                "Return the gesture fields, speech and state_update together in the same JSON object."
+                "\nMANDATORY: always include all SEVEN keys in this order: gesture, "
+                "hand_visible, directed_at_robot, present_in_latest, evidence, speech, "
+                "state_update. "
+                "Adding speech does NOT replace evidence. evidence is required even for none. "
+                "For an empty scene return exactly this complete shape: "
                 '{"gesture":"none","hand_visible":false,"directed_at_robot":false,'
-                '"present_in_latest":false,"evidence":"none","speech":null}. '
+                '"present_in_latest":false,"evidence":"none","speech":null,'
+                '"state_update":{}}. '
                 'For uncertain use evidence="ambiguous" and speech=null. '
-                'For an actionable gesture use the matching evidence code and your own '
-                'short Chinese sentence. Before returning, check that evidence is present.'
-                '\nSpeech must not influence gesture selection. A person simply approaching '
-                'with an arm hanging down beside the thigh is none, not a handshake, '
-                'even if fingers are visible. Handshake requires the forearm and hand '
-                'to be deliberately extended away from the torso toward the camera. '
-                'Do not invent a social action just to have something to say.'
+                "For an actionable gesture use the matching evidence code and your own "
+                "short Chinese sentence. Before returning, check that evidence is present."
+                "\nSpeech must not influence gesture selection. A person simply approaching "
+                "with an arm hanging down beside the thigh is none, not a handshake, "
+                "even if fingers are visible. Handshake requires the forearm and hand "
+                "to be deliberately extended away from the torso toward the camera. "
+                "Do not invent a social action just to have something to say."
             )
+        prompt += "\ntemporal_vision_state=" + json.dumps(
+            self.temporal_state.to_context(),
+            ensure_ascii=False,
+            default=str,
+        )
         if self.task_context:
             prompt += (
                 "\nConsole task preferences (apply only within the gesture rules above; "
@@ -146,17 +173,29 @@ class SocialVisionAgent(VisionDecisionAgent):
         try:
             async with asyncio.timeout(self.timeout_s):
                 output = await self._invoker.ainvoke([f.rgb for f in frames], prompt)
-            observation = (
-                observation_type.model_validate_json(output)
-                if isinstance(output, str)
-                else observation_type.model_validate(output)
-            )
+            candidate = json.loads(output) if isinstance(output, str) else output
+            if not isinstance(candidate, Mapping):
+                raise TypeError("gesture response must be a JSON object")
+            payload = dict(candidate)
+            # Accept older recordings while requiring state_update in new
+            # constrained schemas and prompts.
+            payload.setdefault("state_update", {})
+            observation = observation_type.model_validate(payload)
         except Exception as exc:
             raise DecisionAgentError(
                 f"gesture classification failed: {type(exc).__name__}: {exc}"
             ) from exc
         gesture = observation.gesture
-        self._last_observation = observation.model_dump()
+        self._last_observation = observation.model_dump(exclude={"state_update"})
+        state_payload = observation.state_update.model_dump(exclude_unset=True)
+        state_payload.setdefault(
+            "last_observation",
+            f"gesture={gesture}; evidence={observation.evidence}; "
+            f"present={observation.present_in_latest}",
+        )
+        self._apply_temporal_state_update(
+            TemporalVisionStateUpdate.model_validate(state_payload)
+        )
         confirmed = (
             observation.hand_visible
             and observation.directed_at_robot
@@ -172,15 +211,30 @@ class SocialVisionAgent(VisionDecisionAgent):
             if not observation.present_in_latest:
                 unmet.append("gesture_not_current")
             if _EVIDENCE.get(gesture) != observation.evidence:
-                unmet.append("evidence_mismatch" if gesture in _EVIDENCE else "no_actionable_gesture")
-            return AgentDecision(action="ignore", reason=f"gesture unconfirmed: {gesture} ({', '.join(unmet)})")
+                unmet.append(
+                    "evidence_mismatch"
+                    if gesture in _EVIDENCE
+                    else "no_actionable_gesture"
+                )
+            return AgentDecision(
+                action="ignore",
+                reason=f"gesture unconfirmed: {gesture} ({', '.join(unmet)})",
+            )
         registered = {s.metadata.name: s for s in skill_catalog}
         skill = registered.get(gesture)
-        if skill is None or {"dangerous", "operator_only"}.intersection(skill.metadata.tags):
+        if skill is None or {"dangerous", "operator_only"}.intersection(
+            skill.metadata.tags
+        ):
             return AgentDecision(action="ignore", reason="gesture skill unavailable")
         if (policy_context or {}).get("active_skill") == gesture:
-            return AgentDecision(action="continue", reason=f"gesture ongoing: {gesture}")
+            return AgentDecision(
+                action="continue", reason=f"gesture ongoing: {gesture}"
+            )
         speech = getattr(observation, "speech", None)
         speech = speech.strip() if speech else None
-        return AgentDecision(action="execute_and_speak" if speech else "execute_skill",
-                             skill=gesture, speech=speech or None, reason=observation.evidence)
+        return AgentDecision(
+            action="execute_and_speak" if speech else "execute_skill",
+            skill=gesture,
+            speech=speech or None,
+            reason=observation.evidence,
+        )

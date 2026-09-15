@@ -22,6 +22,11 @@ from perception import CameraFrame, VideoBuffer
 from robot import RobotState
 
 from .decision import AgentDecision, DecisionAgentError
+from .temporal_state import (
+    TemporalVisionState,
+    TemporalVisionStateUpdate,
+    VisionDecisionResponse,
+)
 from .vision_capture import VisionCapture
 
 DEFAULT_VISION_MODEL = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
@@ -43,13 +48,19 @@ _VISION_SYSTEM_PROMPT = """You are the real-time visual decision module for a Un
 The supplied images are ordered frames sampled from the robot's most recent
 video window. Decide only the robot's next action now.
 
-Output exactly one compact JSON object. action is required and must be
-execute_skill, execute_and_speak, speak, continue, interrupt, or ignore.
-Omit unused skill, arguments, speech, and reason fields. Use continue while the
+Output exactly one compact JSON object with two top-level keys: decision and
+state_update. decision.action is required and must be execute_skill,
+execute_and_speak, speak, continue, interrupt, or ignore. Omit unused skill,
+arguments, speech, and reason fields inside decision. Use continue while the
 current behavior should keep running. Use interrupt only when the current
 behavior must stop immediately. Keep reason under four words when included.
+state_update is a bounded update to the previous temporal state. It may contain
+only scene_summary, human_intent, interaction_state, and last_observation.
+Preserve relevant interaction history across overlapping windows. Use null to
+clear a fact that is visibly no longer true. Do not put commands in state_update
+or claim a selected action completed unless runtime context confirms it.
 The skill catalog is reference documentation. Never copy catalog definitions
-into arguments. arguments contains only actual values for the one selected
+into decision.arguments. arguments contains only actual values for the selected
 skill, for example {"arm":"right"} or {"distance_m":0.2}.
 If a person clearly extends a hand toward the robot to shake hands, select the
 handshake skill immediately; do not wait for another confirmation. A handshake
@@ -63,10 +74,11 @@ wave only when the person's hand is visibly waving side-to-side or they make an
 unambiguous greeting gesture. If policy_context says wave was recently selected,
 the person is already greeted; do not wave again, but still select handshake if
 they now extend a hand.
-For no response, use action ignore. For a handshake, use action execute_skill
-and skill handshake. Usually omit arguments so the registered safe defaults are
-used. Never output JSON Schema objects or keys such as type, default, const,
-minimum, or maximum inside arguments.
+For no response, use decision.action ignore. For a handshake, use
+decision.action execute_skill and decision.skill handshake. Usually omit
+arguments so the registered safe defaults are used. Never output JSON Schema
+objects or keys such as type, default, const, minimum, or maximum inside
+arguments.
 Do not describe the video and do not predict far into the future. Use only the
 registered skills and their argument schemas. Keep speech brief.
 """
@@ -94,7 +106,7 @@ class OllamaVisionInvoker:
         self._client = ollama.AsyncClient(host=base_url)
         self.last_metrics: dict[str, object] = {}
         self._request_id = 0
-        self.output_schema = output_schema or AgentDecision.model_json_schema()
+        self.output_schema = output_schema or VisionDecisionResponse.model_json_schema()
         self.max_new_tokens = max_new_tokens
         self.constrain_json = constrain_json
         self.think = think
@@ -126,9 +138,13 @@ class OllamaVisionInvoker:
         )
         payload = response if isinstance(response, Mapping) else response.model_dump()
         if payload.get("done") is not True:
-            raise DecisionAgentError("Ollama returned an incomplete response; check server logs")
+            raise DecisionAgentError(
+                "Ollama returned an incomplete response; check server logs"
+            )
         if payload.get("done_reason") == "length":
-            raise DecisionAgentError("Ollama exhausted the output token budget; refusing truncated decision")
+            raise DecisionAgentError(
+                "Ollama exhausted the output token budget; refusing truncated decision"
+            )
         finished = time.monotonic()
         self.last_metrics = {
             "remote_request_id": remote_request_id,
@@ -137,10 +153,17 @@ class OllamaVisionInvoker:
             "input_tokens": payload.get("prompt_eval_count"),
             "generated_tokens": payload.get("eval_count"),
         }
-        for field in ("total_duration", "load_duration", "prompt_eval_duration", "eval_duration"):
+        for field in (
+            "total_duration",
+            "load_duration",
+            "prompt_eval_duration",
+            "eval_duration",
+        ):
             value = payload.get(field)
             if isinstance(value, (int, float)):
-                self.last_metrics[field.replace("_duration", "_s")] = round(value / 1e9, 3)
+                self.last_metrics[field.replace("_duration", "_s")] = round(
+                    value / 1e9, 3
+                )
         total_s = self.last_metrics.get("total_s")
         round_trip_s = self.last_metrics.get("round_trip_s")
         if isinstance(total_s, (int, float)) and isinstance(round_trip_s, (int, float)):
@@ -294,15 +317,15 @@ def _skill_catalog_payload(
         schema = skill.args_model.model_json_schema()
         raw_properties = schema.get("properties", {})
         raw_required = schema.get("required", [])
-        required_names = {
-            name for name in raw_required if isinstance(name, str)
-        } if isinstance(raw_required, list) else set()
+        required_names = (
+            {name for name in raw_required if isinstance(name, str)}
+            if isinstance(raw_required, list)
+            else set()
+        )
         arguments: dict[str, object] = {}
         if isinstance(raw_properties, Mapping):
             for name, raw_descriptor in raw_properties.items():
-                if not isinstance(name, str) or not isinstance(
-                    raw_descriptor, Mapping
-                ):
+                if not isinstance(name, str) or not isinstance(raw_descriptor, Mapping):
                     continue
                 if "default" in raw_descriptor:
                     arguments[name] = raw_descriptor["default"]
@@ -385,6 +408,7 @@ class VisionDecisionAgent:
         self.timeout_s = timeout_s
         self.goal = goal.strip()
         self._invoker = invoker or TransformersVisionInvoker(model_name)
+        self._temporal_state = TemporalVisionState()
 
     async def warmup(self) -> None:
         warmup = getattr(self._invoker, "warmup", None)
@@ -400,6 +424,26 @@ class VisionDecisionAgent:
     def last_metrics(self) -> Mapping[str, object]:
         metrics = getattr(self._invoker, "last_metrics", {})
         return dict(metrics) if isinstance(metrics, Mapping) else {}
+
+    @property
+    def temporal_state(self) -> TemporalVisionState:
+        return self._temporal_state
+
+    def reset_temporal_state(self) -> None:
+        self._temporal_state = TemporalVisionState()
+
+    def record_action(self, decision: AgentDecision) -> None:
+        if decision.skill is not None:
+            action = f"{decision.action}:{decision.skill}"
+        else:
+            action = decision.action
+        self._temporal_state = self._temporal_state.record_action(action)
+
+    def _apply_temporal_state_update(
+        self,
+        update: TemporalVisionStateUpdate,
+    ) -> None:
+        self._temporal_state = self._temporal_state.apply(update)
 
     async def decide(
         self,
@@ -428,6 +472,7 @@ class VisionDecisionAgent:
                 "details": robot_state.details,
             },
             "policy_context": dict(policy_context or {}),
+            "temporal_vision_state": self._temporal_state.to_context(),
             "skill_catalog": _skill_catalog_payload(skill_catalog),
         }
         prompt = (
@@ -440,10 +485,12 @@ class VisionDecisionAgent:
                     [frame.rgb for frame in frames],
                     prompt,
                 )
-            decision = self._parse_output(
+            response = self._parse_response(
                 output,
                 recoverable_skills=self._recoverable_skill_names(skill_catalog),
             )
+            decision = response.decision
+            self._apply_temporal_state_update(response.state_update)
         except TimeoutError as exc:
             raise DecisionAgentError(
                 f"Vision Decision Agent timed out after {self.timeout_s:g} seconds"
@@ -485,11 +532,20 @@ class VisionDecisionAgent:
         *,
         recoverable_skills: set[str] | None = None,
     ) -> AgentDecision:
+        return VisionDecisionAgent._parse_response(
+            output,
+            recoverable_skills=recoverable_skills,
+        ).decision
+
+    @staticmethod
+    def _parse_response(
+        output: object,
+        *,
+        recoverable_skills: set[str] | None = None,
+    ) -> VisionDecisionResponse:
         if isinstance(output, Mapping):
             candidate = output.get("structured_response", output)
-            return AgentDecision.model_validate(
-                _sanitize_visual_noop_payload(candidate)
-            )
+            return VisionDecisionAgent._validate_response_candidate(candidate)
         if not isinstance(output, str):
             raise DecisionAgentError("Vision Decision Agent returned invalid output")
         text = output.strip()
@@ -506,13 +562,19 @@ class VisionDecisionAgent:
             if start < 0 or end <= start:
                 recovered = _recover_safe_noop(text)
                 if recovered is not None:
-                    return recovered
+                    return VisionDecisionResponse(
+                        decision=recovered,
+                        state_update=TemporalVisionStateUpdate(),
+                    )
                 recovered_skill = _recover_truncated_skill_decision(
                     text,
                     recoverable_skills or set(),
                 )
                 if recovered_skill is not None:
-                    return recovered_skill
+                    return VisionDecisionResponse(
+                        decision=recovered_skill,
+                        state_update=TemporalVisionStateUpdate(),
+                    )
                 raise DecisionAgentError(
                     "Vision Decision Agent did not return a JSON object; "
                     f"raw={text[:500]!r}"
@@ -522,18 +584,37 @@ class VisionDecisionAgent:
             except json.JSONDecodeError as exc:
                 recovered = _recover_safe_noop(text)
                 if recovered is not None:
-                    return recovered
+                    return VisionDecisionResponse(
+                        decision=recovered,
+                        state_update=TemporalVisionStateUpdate(),
+                    )
                 recovered_skill = _recover_truncated_skill_decision(
                     text,
                     recoverable_skills or set(),
                 )
                 if recovered_skill is not None:
-                    return recovered_skill
+                    return VisionDecisionResponse(
+                        decision=recovered_skill,
+                        state_update=TemporalVisionStateUpdate(),
+                    )
                 raise DecisionAgentError(
                     "Vision Decision Agent returned invalid JSON: "
                     f"{exc}; raw={text[:500]!r}"
                 ) from exc
-        return AgentDecision.model_validate(_sanitize_visual_noop_payload(decoded))
+        return VisionDecisionAgent._validate_response_candidate(decoded)
+
+    @staticmethod
+    def _validate_response_candidate(candidate: object) -> VisionDecisionResponse:
+        if isinstance(candidate, Mapping) and "decision" in candidate:
+            payload = dict(candidate)
+            payload["decision"] = _sanitize_visual_noop_payload(payload["decision"])
+            return VisionDecisionResponse.model_validate(payload)
+        return VisionDecisionResponse(
+            decision=AgentDecision.model_validate(
+                _sanitize_visual_noop_payload(candidate)
+            ),
+            state_update=TemporalVisionStateUpdate(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,6 +676,7 @@ class VisionPolicyDecision:
     decision: AgentDecision
     robot_state: RobotState
     policy_context: Mapping[str, object] | None = None
+    temporal_state: Mapping[str, object] | None = None
     model_metrics: Mapping[str, object] | None = None
     request_id: str | None = None
 
@@ -615,6 +697,7 @@ class VisionPolicyDecision:
                 "details": self.robot_state.details,
             },
             "policy_context": dict(self.policy_context or {}),
+            "temporal_state": dict(self.temporal_state or {}),
             "model_metrics": dict(self.model_metrics or {}),
             "request_id": self.request_id,
         }
@@ -715,10 +798,7 @@ class VisionPolicyWorker:
 
     def observe_frame(self, frame: CameraFrame) -> None:
         distance_m = frame.nearest_obstacle_distance_m
-        if (
-            distance_m is not None
-            and distance_m <= _HANDSHAKE_CONFIRMATION_DISTANCE_M
-        ):
+        if distance_m is not None and distance_m <= _HANDSHAKE_CONFIRMATION_DISTANCE_M:
             self._last_close_obstacle_at_s = frame.observed_at_s
 
     async def start(self) -> None:
@@ -829,17 +909,31 @@ class VisionPolicyWorker:
                 try:
                     frames = self._orient_frames(frames)
                 except Exception as exc:  # noqa: BLE001 - policy must remain alive
-                    self._put_latest(self._error_queue, VisionPolicyError(stage="decision", message=f"frame rotation failed: {exc}"))
+                    self._put_latest(
+                        self._error_queue,
+                        VisionPolicyError(
+                            stage="decision", message=f"frame rotation failed: {exc}"
+                        ),
+                    )
                     await asyncio.sleep(self.interval_s)
                     continue
                 if self.capture is not None and self.capture.available:
                     try:
                         # Freeze JPEG inputs once: saved bytes are passed unchanged to Ollama.
-                        frames = tuple(replace(f, rgb=OllamaVisionInvoker._as_bytes(f.rgb)) for f in frames)
-                        capture_path = await asyncio.to_thread(self.capture.begin, frames)
-                        logging.getLogger("agent.vision_capture").info("saved model inputs: %s", capture_path)
+                        frames = tuple(
+                            replace(f, rgb=OllamaVisionInvoker._as_bytes(f.rgb))
+                            for f in frames
+                        )
+                        capture_path = await asyncio.to_thread(
+                            self.capture.begin, frames
+                        )
+                        logging.getLogger("agent.vision_capture").info(
+                            "saved model inputs: %s", capture_path
+                        )
                     except Exception as exc:  # noqa: BLE001 - capture is optional
-                        logging.getLogger("agent.vision_capture").warning("capture disabled after write failure: %s", exc)
+                        logging.getLogger("agent.vision_capture").warning(
+                            "capture disabled after write failure: %s", exc
+                        )
                         self.capture = None
                 try:
                     robot_state = await self.runtime.robot.get_state()
@@ -857,6 +951,9 @@ class VisionPolicyWorker:
                     )
                     decided_at_s = time.monotonic()
                     self._last_decision = decision
+                    temporal_state = self.decision_agent.temporal_state.model_dump(
+                        mode="json"
+                    )
                     model_metrics = self._build_model_metrics(
                         request_id=request_id,
                         captured_at_s=captured_at_s,
@@ -866,12 +963,16 @@ class VisionPolicyWorker:
                     )
                     self._record_decision_completion(decided_at_s)
                     model_metrics["decision_rate_hz"] = self._decision_rate_hz()
-                    self._finish_capture(capture_path, {
-                        "decided_at_s": decided_at_s,
-                        "decision": decision.model_dump(),
-                        "model_metrics": model_metrics,
-                        "policy_context": policy_context,
-                    })
+                    self._finish_capture(
+                        capture_path,
+                        {
+                            "decided_at_s": decided_at_s,
+                            "decision": decision.model_dump(),
+                            "temporal_state": temporal_state,
+                            "model_metrics": model_metrics,
+                            "policy_context": policy_context,
+                        },
+                    )
                     self._put_latest(
                         self._policy_decision_queue,
                         VisionPolicyDecision(
@@ -882,8 +983,15 @@ class VisionPolicyWorker:
                             decision=decision,
                             robot_state=robot_state,
                             policy_context=policy_context,
-                            model_metrics={**model_metrics,
-                                           **({"capture_path": str(capture_path)} if capture_path else {})},
+                            temporal_state=temporal_state,
+                            model_metrics={
+                                **model_metrics,
+                                **(
+                                    {"capture_path": str(capture_path)}
+                                    if capture_path
+                                    else {}
+                                ),
+                            },
                             request_id=request_id,
                         ),
                     )
@@ -913,6 +1021,8 @@ class VisionPolicyWorker:
                         )
                     elif decision.action == "interrupt":
                         interrupted = await self.interrupt("vision policy")
+                        if interrupted:
+                            self.decision_agent.record_action(decision)
                         self._put_latest(
                             self._outcome_queue,
                             self._outcome(
@@ -953,7 +1063,9 @@ class VisionPolicyWorker:
             try:
                 self.capture.finish(path, result)
             except Exception as exc:  # noqa: BLE001 - capture must not stop policy
-                logging.getLogger("agent.vision_capture").warning("could not save capture result: %s", exc)
+                logging.getLogger("agent.vision_capture").warning(
+                    "could not save capture result: %s", exc
+                )
 
     def _orient_frames(self, frames):
         if not self.rotation_deg:
@@ -1121,6 +1233,8 @@ class VisionPolicyWorker:
                     self._active_skill = None
                     self._active_started_at_s = None
                     self._active_required_resources = ()
+                if (skill_result is not None and skill_result.success) or speech_spoken:
+                    self.decision_agent.record_action(decision)
                 self._put_latest(
                     self._outcome_queue,
                     self._outcome(
@@ -1145,7 +1259,9 @@ class VisionPolicyWorker:
                     VisionPolicyError(stage="execution", message=str(exc)),
                 )
 
-    async def _execute(self, decision: AgentDecision) -> tuple[SkillResult | None, bool]:
+    async def _execute(
+        self, decision: AgentDecision
+    ) -> tuple[SkillResult | None, bool]:
         if decision.action == "execute_and_speak":
             if decision.skill is None:
                 raise RuntimeError("validated vision decision is missing a skill")
@@ -1206,9 +1322,7 @@ class VisionPolicyWorker:
         if decision.skill is None:
             return ()
         try:
-            return self.runtime.registry.get(
-                decision.skill
-            ).metadata.required_resources
+            return self.runtime.registry.get(decision.skill).metadata.required_resources
         except KeyError:
             return ()
 
@@ -1354,10 +1468,7 @@ class VisionPolicyWorker:
     def _decision_rate_hz(self) -> float:
         if len(self._decision_finished_at_s) < 2:
             return 0.0
-        elapsed_s = (
-            self._decision_finished_at_s[-1]
-            - self._decision_finished_at_s[0]
-        )
+        elapsed_s = self._decision_finished_at_s[-1] - self._decision_finished_at_s[0]
         if elapsed_s <= 0:
             return 0.0
         return round(
@@ -1369,7 +1480,11 @@ class VisionPolicyWorker:
     def _decision_signature(decision: AgentDecision) -> str:
         return json.dumps(
             {
-                "action": ("execute_skill" if decision.skill and decision.action == "execute_and_speak" else decision.action),
+                "action": (
+                    "execute_skill"
+                    if decision.skill and decision.action == "execute_and_speak"
+                    else decision.action
+                ),
                 "skill": (
                     VisionPolicyWorker._canonical_skill_name(decision.skill)
                     if decision.skill is not None

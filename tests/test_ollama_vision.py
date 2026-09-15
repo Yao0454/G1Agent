@@ -13,14 +13,24 @@ class OllamaVisionTests(unittest.IsolatedAsyncioTestCase):
         return invoker
 
     async def test_generic_json_is_explicit_nonstreaming(self):
-        invoker = self.invoker({
-            "done": True, "done_reason": "stop", "message": {"content": "{}"},
-        })
+        invoker = self.invoker(
+            {
+                "done": True,
+                "done_reason": "stop",
+                "message": {"content": "{}"},
+            }
+        )
         self.assertEqual(await invoker.ainvoke([b"jpeg"], "test"), "{}")
         kwargs = invoker._client.chat.call_args.kwargs
         self.assertEqual(kwargs["format"], "json")
         self.assertIs(kwargs["stream"], False)
         self.assertNotIn("think", kwargs)
+
+    async def test_schema_mode_uses_decision_and_temporal_state_envelope(self):
+        invoker = OllamaVisionInvoker("test")
+
+        self.assertIn("decision", invoker.output_schema["properties"])
+        self.assertIn("state_update", invoker.output_schema["properties"])
 
     async def test_thinking_can_be_explicitly_disabled(self):
         invoker = self.invoker({"done": True, "message": {"content": "{}"}})
@@ -30,9 +40,9 @@ class OllamaVisionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_incomplete_and_token_limited_responses_rejected(self):
         for payload in (
-            {"done": False}, {},
+            {"done": False},
+            {},
             {"done": True, "done_reason": "length", "message": {"content": "{}"}},
         ):
-            with self.subTest(payload=payload):
-                with self.assertRaises(DecisionAgentError):
-                    await self.invoker(payload).ainvoke([b"jpeg"], "test")
+            with self.subTest(payload=payload), self.assertRaises(DecisionAgentError):
+                await self.invoker(payload).ainvoke([b"jpeg"], "test")
