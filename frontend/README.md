@@ -2,6 +2,19 @@
 
 仓库内 FastAPI 控制面的 Flutter 客户端，支持 Web 与 macOS。
 
+## 当前配置（2026-10-09）
+
+默认控制台 API 为 `http://192.168.31.198:8000`，视觉服务为
+`http://192.168.31.143:8011`，模型为 `models/UnifoLM-ER-1`。
+控制台视觉任务已改为通用决策，全部 52 个技能名默认可调用，无需额外开关。
+任务参数、资源锁、机器人状态和底盘深度停止仍由程序检查。
+
+机器人端运行 `.venv/bin/python -m app.api --hardware --network eth0 --camera-source local`。
+前端运行 `flutter run -d chrome --dart-define=G1_API_BASE_URL=http://192.168.31.198:8000`。
+仅预览不执行动作，提交任务后持续观察并按需执行，停止任务结束。
+
+以下是旧版社交视觉接入记录，三手势范围、Ollama 和隧道配置不再是当前默认值。
+
 ## 已实现
 
 - 通过 REST 启动/停止会话、保存系统提示词、提交及取消任务

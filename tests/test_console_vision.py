@@ -2,12 +2,17 @@
 
 import asyncio
 import io
+import json
 import time
 import unittest
+from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from agent.remote_vision import REMOTE_VISION_MODEL, RemoteVisionInvoker
+from agent.grounded_vision import GroundedVisionInvoker, GESTURE_PROMPT
 from agent.social_vision import SocialVisionAgent
 from app.api import create_app
 from app.backend import BackendConfig, ConsoleBackend
@@ -122,6 +127,78 @@ def wait_for(client, predicate):
 
 
 class ConsoleVisionTests(unittest.TestCase):
+    def test_production_vision_factory_receives_images_and_dispatches_general_tool(
+        self,
+    ):
+        camera = Camera()
+        requests = []
+
+        def handle(request):
+            if request.url.path == "/health":
+                return httpx.Response(
+                    200, json={"status": "ready", "model": REMOTE_VISION_MODEL}
+                )
+            payload = json.loads(request.content)
+            requests.append(payload)
+            if payload["prompt"] == GESTURE_PROMPT:
+                return httpx.Response(200, json={"request_id": payload["request_id"], "output": "D"})
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": payload["request_id"],
+                    "output": json.dumps(
+                        {
+                            "decision": {
+                                "action": "execute_skill",
+                                "skill": "set_speed_mode",
+                                "arguments": {"mode": 1},
+                            },
+                            "state_update": {},
+                        }
+                    ),
+                },
+            )
+
+        def remote_factory(*args, **kwargs):
+            return GroundedVisionInvoker(
+                *args, **kwargs, transport=httpx.MockTransport(handle)
+            )
+
+        backend = ConsoleBackend(
+            BackendConfig(camera_source="local", audio_enabled=False),
+            agent_factory=fake_agent_factory,
+            camera_factory=lambda: camera,
+        )
+        with (
+            patch("app.backend.GroundedVisionInvoker", side_effect=remote_factory),
+            TestClient(create_app(backend=backend)) as client,
+        ):
+            wait_for(client, lambda s: s["camera"]["frameAvailable"])
+            response = client.post(
+                "/api/v1/tasks", json={"instruction": "调用 set_speed_mode，mode=1"}
+            )
+            self.assertEqual(response.status_code, 202)
+            snapshot = wait_for(
+                client,
+                lambda s: any(t["name"] == "set_speed_mode" for t in s["tools"]),
+            )
+            self.assertIn(
+                ("loco_action", ("set_speed_mode", {"mode": 1})),
+                backend.robot.events,
+            )
+            self.assertTrue(requests[0]["frames"])
+            self.assertTrue(any("zero_torque" in r["prompt"] for r in requests))
+            self.assertNotIn(
+                "Do not invent robot capabilities or emit action JSON",
+                requests[0]["prompt"],
+            )
+            tool = next(
+                t for t in snapshot["tools"] if t["name"] == "set_speed_mode"
+            )
+            self.assertTrue(tool["result"]["success"])
+            client.post("/api/v1/tasks/current/cancel", json={})
+            self.assertIsNone(backend._vision_worker)
+
     def test_cancel_pending_inference_prevents_later_actions(self):
         backend, _camera, invoker = self.build()
         invoker.slow = True
@@ -141,11 +218,12 @@ class ConsoleVisionTests(unittest.TestCase):
         )
         backend.system_prompt = "简短回应"
         agent = backend._build_vision_agent("观察挥手")
-        self.assertEqual(agent.model_name, "qwen3.5:9b")
-        self.assertTrue(agent.generate_speech)
-        self.assertIn("简短回应", agent.task_context)
-        self.assertIn("观察挥手", agent.task_context)
-        self.assertIs(agent._invoker.think, False)
+        self.assertEqual(agent.model_name, "models/UnifoLM-ER-1")
+        self.assertIn("简短回应", agent.goal)
+        self.assertIn("观察挥手", agent.goal)
+        self.assertEqual(
+            str(agent._invoker._client.base_url), "http://192.168.31.143:8011"
+        )
 
     def build(self):
         camera = Camera()

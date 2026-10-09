@@ -1,5 +1,31 @@
 # G1 Agent
 
+## 当前配置（2026-10-09）
+
+所有入口默认注册全部 52 个技能名（包含别名），无需额外启用参数；技能不再带
+operator_only / dangerous 权限标签。参数验证、资源锁、机器人状态检查和视觉深度停止仍有效。
+文本 Agent 和通用视觉 Agent 都能选择完整目录。社交分类器作为可选的专用模式保留。
+
+控制台真实相机任务默认使用通用 VisionDecisionAgent 和 UnifoLM 服务：
+`http://192.168.31.143:8011`，模型 `models/UnifoLM-ER-1`。
+接口为 `GET /health`、`POST /v1/vision/invoke`，不是 Ollama 协议。
+
+```bash
+# 在机器人主机运行，连接本机 D435i 与 eth0 上的 G1
+.venv/bin/python -m app.api --hardware --network eth0 --camera-source local
+
+# 前端连接机器人控制台
+cd frontend
+flutter run -d chrome --dart-define=G1_API_BASE_URL=http://192.168.31.198:8000
+```
+
+控制台相机模式持续观察最近 2 秒、均匀采样最多 8 帧，根据任务选择技能，点击停止结束。
+独立视觉 CLI 可用 `sh scripts/run-remote-vision.sh`，默认模拟机器人，
+可通过 `--vision-goal` 指定任务。不要让两个入口同时占用同一相机。
+
+以下为此前版本的接入记录，其中 Ollama 地址、三手势范围和可选操作者开关
+不代表上述当前默认配置。
+
 ## 控制台视觉接入（2026-09-12）
 
 Flutter控制台已接入原有滑动视频策略。后端选择本地相机时，提交任务启动持续视觉

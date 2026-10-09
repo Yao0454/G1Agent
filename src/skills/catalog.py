@@ -63,15 +63,9 @@ def build_g1_all_skills() -> tuple[RobotSkill[SkillArgs], ...]:
     return build_g1_autonomy_skills() + build_g1_operator_skills()
 
 
-def register_g1_skills(
-    runtime: SkillRuntime,
-    *,
-    include_operator_only: bool = False,
-) -> None:
-    skills = list(
-        build_g1_all_skills() if include_operator_only else build_g1_autonomy_skills()
-    )
-    for skill in skills:
+def register_g1_skills(runtime: SkillRuntime) -> None:
+    """Expose the complete SDK-backed catalog to every Agent."""
+    for skill in build_g1_all_skills():
         runtime.register(skill)
 
 

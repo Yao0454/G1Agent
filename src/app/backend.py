@@ -16,9 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from adapters import AudioOutputError, UnitreeAudioOutput
 from adapters.langchain import SkillToolObserver
 from agent import AgentError, RobotAgent
+from agent.remote_vision import (
+    REMOTE_VISION_MODEL,
+    REMOTE_VISION_URL,
+)
+from agent.grounded_vision import GroundedVisionInvoker, is_visual_social_goal
 from agent.service import SYSTEM_PROMPT
-from agent.social_vision import SocialVisionAgent
-from agent.vision_policy import OllamaVisionInvoker, VisionPolicyWorker
+from agent.vision_policy import VisionDecisionAgent, VisionPolicyWorker
 from core.runtime import SkillRuntime
 from perception import (
     CameraFrame,
@@ -135,7 +139,6 @@ class BackendConfig:
     hardware: bool = False
     network_interface: str = ""
     domain_id: int = 0
-    include_operator_only_skills: bool = False
     model_name: str | None = None
     ollama_url: str | None = None
     audio_enabled: bool = True
@@ -146,8 +149,8 @@ class BackendConfig:
     camera_height: int = 480
     camera_fps: int = 30
     camera_detection_fps: float = 5.0
-    vision_model: str = "qwen3.5:9b"
-    vision_url: str = "http://127.0.0.1:11435"
+    vision_model: str = REMOTE_VISION_MODEL
+    vision_url: str = REMOTE_VISION_URL
     vision_rotation_deg: int = 180
     vision_max_age_s: float = 5.0
     # Keep the console's remote visual policy aligned with the CLI policy:
@@ -208,7 +211,7 @@ class ConsoleBackend(SkillToolObserver):
         robot: RobotAdapter | None = None,
         agent_factory: AgentFactory | None = None,
         camera_factory: Callable[[], RealSensePersonDetector] | None = None,
-        vision_agent_factory: Callable[[str], SocialVisionAgent] | None = None,
+        vision_agent_factory: Callable[[str], VisionDecisionAgent] | None = None,
     ) -> None:
         self.config = config or BackendConfig()
         self.hardware_robot: UnitreeG1Adapter | None = None
@@ -226,10 +229,8 @@ class ConsoleBackend(SkillToolObserver):
             self.robot = SimulatedRobotAdapter()
 
         self.runtime = SkillRuntime(self.robot)
-        register_g1_skills(
-            self.runtime,
-            include_operator_only=self.config.include_operator_only_skills,
-        )
+        register_g1_skills(self.runtime)
+
         self._agent_factory = agent_factory or self._build_agent
         self._camera_factory = camera_factory or self._build_camera
         self._vision_agent_factory = vision_agent_factory or self._build_vision_agent
@@ -287,19 +288,24 @@ class ConsoleBackend(SkillToolObserver):
             ),
         )
 
-    def _build_vision_agent(self, instruction: str) -> SocialVisionAgent:
-        return SocialVisionAgent(
+    def _build_vision_agent(self, instruction: str) -> VisionDecisionAgent:
+        # The text Agent prompt forbids action JSON because it uses LangChain
+        # tools. The visual policy uses JSON as its tool-call protocol instead.
+        preferences = (
+            "Follow the user's task using the camera and registered skills. "
+            "Keep spoken responses concise and in the user's language."
+            if self.system_prompt == SYSTEM_PROMPT
+            else self.system_prompt
+        )
+        return VisionDecisionAgent(
             model_name=self.config.vision_model,
-            prompt_profile="egocentric",
-            generate_speech=True,
-            task_context=f"{self.system_prompt}\nCurrent task: {instruction}",
+            goal=f"{preferences}\nCurrent task: {instruction}",
             timeout_s=120,
-            invoker=OllamaVisionInvoker(
+            invoker=GroundedVisionInvoker(
                 self.config.vision_model,
+                grounding_enabled=is_visual_social_goal(instruction),
                 base_url=self.config.vision_url,
-                constrain_json=False,
                 max_new_tokens=256,
-                think=False,
             ),
         )
 
@@ -748,14 +754,14 @@ class ConsoleBackend(SkillToolObserver):
             await self._log(
                 "INFO",
                 "vision",
-                "已接入实时RGB窗口与SkillRuntime；范围：握手/挥手/击掌。",
+                "已接入实时RGB窗口与SkillRuntime；全部已注册技能可调用。",
             )
             while True:
                 await self._check_vision_camera()
                 self.model_status = "持续视觉交互"
-                self.progress_text = "正在观察手势 · 停止任务可结束"
+                self.progress_text = "正在观察并执行任务 · 停止任务可结束"
                 self.skill_name = (
-                    "执行视觉技能" if worker.active_behavior else "等待确认手势"
+                    "执行视觉技能" if worker.active_behavior else "等待视觉决策"
                 )
                 self.progress = 40
                 self.active_step = 1

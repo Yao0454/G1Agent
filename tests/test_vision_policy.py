@@ -187,7 +187,7 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(invoker.calls[0][0]), 2)
         self.assertIn('"frame_count": 2', invoker.calls[0][1])
         self.assertIn('"name": "wave"', invoker.calls[0][1])
-        self.assertNotIn('"name": "wave_hand"', invoker.calls[0][1])
+        self.assertIn('"name": "wave_hand"', invoker.calls[0][1])
         self.assertIn('"last_selected_skill": "wave"', invoker.calls[0][1])
 
     async def test_continue_and_interrupt_are_valid_noop_decisions(self) -> None:
@@ -279,6 +279,7 @@ class VisionDecisionAgentTests(unittest.IsolatedAsyncioTestCase):
                     "description": HandshakeSkill.metadata.description,
                     "argument_defaults": {"duration_s": 4.0},
                     "required_arguments": [],
+                    "arguments_schema": HandshakeSkill.args_model.model_json_schema(),
                     "interruptible": True,
                 }
             ],

@@ -27,7 +27,7 @@ class PromptPanel extends StatelessWidget {
           children: [
             Text(
               controller.cameraSource == 'local'
-                  ? '视觉任务偏好（不能覆盖手势与安全约束）'
+                  ? '视觉任务目标与行为要求'
                   : '定义机器人的行为与约束',
               style: const TextStyle(color: Color(0xFF97A1B1), fontSize: 12),
             ),

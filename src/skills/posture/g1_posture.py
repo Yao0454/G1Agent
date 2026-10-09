@@ -62,10 +62,6 @@ class PostureSkill(RobotSkill[PostureArgs]):
     def __init__(self, spec: PostureSpec) -> None:
         self.spec = spec
         tags = ["posture", "sdk_loco"]
-        if spec.operator_only:
-            tags.append("operator_only")
-        if spec.dangerous:
-            tags.append("dangerous")
         self.metadata = SkillMetadata(
             name=spec.skill_name,
             description=spec.description,

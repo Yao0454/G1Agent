@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDiscon
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import Field
 
+from agent.remote_vision import REMOTE_VISION_MODEL, REMOTE_VISION_URL
 from perception import PerceptionError
 
 from .backend import (
@@ -260,12 +261,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=5.0,
         help="person detection rate; RGB preview continues at --camera-fps",
     )
-    parser.add_argument("--vision-model", default="qwen3.5:9b")
-    parser.add_argument("--vision-url", default="http://127.0.0.1:11435")
+    parser.add_argument("--vision-model", default=REMOTE_VISION_MODEL)
+    parser.add_argument("--vision-url", default=REMOTE_VISION_URL)
     parser.add_argument(
         "--vision-rotation-deg", type=int, choices=(0, 90, 180, 270), default=180
     )
-    parser.add_argument("--include-operator-only-skills", action="store_true")
     return parser
 
 
@@ -275,7 +275,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         hardware=args.hardware,
         network_interface=args.network,
         domain_id=args.domain_id,
-        include_operator_only_skills=args.include_operator_only_skills,
         model_name=args.model,
         ollama_url=args.ollama_url,
         audio_enabled=not args.no_audio,

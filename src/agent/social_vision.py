@@ -222,9 +222,7 @@ class SocialVisionAgent(VisionDecisionAgent):
             )
         registered = {s.metadata.name: s for s in skill_catalog}
         skill = registered.get(gesture)
-        if skill is None or {"dangerous", "operator_only"}.intersection(
-            skill.metadata.tags
-        ):
+        if skill is None:
             return AgentDecision(action="ignore", reason="gesture skill unavailable")
         if (policy_context or {}).get("active_skill") == gesture:
             return AgentDecision(

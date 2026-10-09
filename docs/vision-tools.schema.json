@@ -1,0 +1,974 @@
+[
+    {
+        "name": "wave",
+        "description": "Wave only in response to a visibly waving or explicit greeting gesture; never use for a forward extended handshake offer.",
+        "argument_defaults": {
+            "arm": "right"
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "arm": {
+                    "const": "right",
+                    "default": "right",
+                    "title": "Arm",
+                    "type": "string"
+                }
+            },
+            "title": "WaveArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "wave_hand",
+        "description": "Run the SDK wave-hand action.",
+        "argument_defaults": {
+            "arm": "right"
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "arm": {
+                    "const": "right",
+                    "default": "right",
+                    "title": "Arm",
+                    "type": "string"
+                }
+            },
+            "title": "WaveArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "handshake",
+        "description": "Highest-priority response when a person extends a hand toward the robot around waist or lower-chest height; shake it, then release.",
+        "argument_defaults": {
+            "duration_s": 4.0
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "duration_s": {
+                    "default": 4.0,
+                    "maximum": 10.0,
+                    "minimum": 1.0,
+                    "title": "Duration S",
+                    "type": "number"
+                }
+            },
+            "title": "HandshakeArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "shake_hand",
+        "description": "Run the SDK handshake sequence and release the arm.",
+        "argument_defaults": {
+            "duration_s": 4.0
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "duration_s": {
+                    "default": 4.0,
+                    "maximum": 10.0,
+                    "minimum": 1.0,
+                    "title": "Duration S",
+                    "type": "number"
+                }
+            },
+            "title": "HandshakeArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "two_hand_kiss",
+        "description": "Make a two-hand kiss gesture.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "left_kiss",
+        "description": "Make a left kiss gesture.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "right_kiss",
+        "description": "Make a right kiss gesture.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "hands_up",
+        "description": "Raise both hands.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "clap",
+        "description": "Clap both hands.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "high_five",
+        "description": "Offer a high five.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "hug",
+        "description": "Make a welcoming hug gesture.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "heart",
+        "description": "Make a heart with both hands.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "right_heart",
+        "description": "Make a heart gesture with the right arm.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "reject",
+        "description": "Make a rejection gesture.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "right_hand_up",
+        "description": "Raise the right hand.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "x_ray",
+        "description": "Perform the SDK x-ray pose.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "high_wave",
+        "description": "Wave with the hand raised.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "release_arm",
+        "description": "Release the current G1 arm pose or handshake.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "ArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "squat",
+        "description": "Enter the G1 squat posture.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "sit",
+        "description": "Enter the G1 sitting posture.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "stand_up",
+        "description": "Stand up using the G1 controller.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "high_stand",
+        "description": "Use the high standing height.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "low_stand",
+        "description": "Use the low standing height.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "balance_stand",
+        "description": "Enter balanced standing mode.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "move_forward",
+        "description": "Move forward by a short bounded distance, then stop.",
+        "argument_defaults": {
+            "distance_m": 0.2
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "distance_m": {
+                    "default": 0.2,
+                    "maximum": 0.3,
+                    "minimum": 0.05,
+                    "title": "Distance M",
+                    "type": "number"
+                }
+            },
+            "title": "LinearMoveArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "move_backward",
+        "description": "Move backward by a short bounded distance, then stop.",
+        "argument_defaults": {
+            "distance_m": 0.2
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "distance_m": {
+                    "default": 0.2,
+                    "maximum": 0.3,
+                    "minimum": 0.05,
+                    "title": "Distance M",
+                    "type": "number"
+                }
+            },
+            "title": "MoveBackwardArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "move_left",
+        "description": "Step left by a short bounded distance, then stop.",
+        "argument_defaults": {
+            "distance_m": 0.2
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "distance_m": {
+                    "default": 0.2,
+                    "maximum": 0.3,
+                    "minimum": 0.05,
+                    "title": "Distance M",
+                    "type": "number"
+                }
+            },
+            "title": "LinearMoveArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "move_right",
+        "description": "Step right by a short bounded distance, then stop.",
+        "argument_defaults": {
+            "distance_m": 0.2
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "distance_m": {
+                    "default": 0.2,
+                    "maximum": 0.3,
+                    "minimum": 0.05,
+                    "title": "Distance M",
+                    "type": "number"
+                }
+            },
+            "title": "LinearMoveArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "turn_left",
+        "description": "Turn left by a small bounded angle, then stop.",
+        "argument_defaults": {
+            "angle_deg": 15.0
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "angle_deg": {
+                    "default": 15.0,
+                    "maximum": 45.0,
+                    "minimum": 5.0,
+                    "title": "Angle Deg",
+                    "type": "number"
+                }
+            },
+            "title": "TurnArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "turn_right",
+        "description": "Turn right by a small bounded angle, then stop.",
+        "argument_defaults": {
+            "angle_deg": 15.0
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "angle_deg": {
+                    "default": 15.0,
+                    "maximum": 45.0,
+                    "minimum": 5.0,
+                    "title": "Angle Deg",
+                    "type": "number"
+                }
+            },
+            "title": "TurnArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "stop",
+        "description": "Stop locomotion and release the current arm pose.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "StopArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "stop_move",
+        "description": "Stop the G1 locomotion controller.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "StopArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "move",
+        "description": "Move with bounded forward, lateral, and yaw velocities, then stop.",
+        "argument_defaults": {
+            "forward_m_s": 0.1,
+            "lateral_m_s": 0.0,
+            "yaw_rad_s": 0.0,
+            "duration_s": 0.5
+        },
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "forward_m_s": {
+                    "default": 0.1,
+                    "maximum": 0.3,
+                    "minimum": -0.3,
+                    "title": "Forward M S",
+                    "type": "number"
+                },
+                "lateral_m_s": {
+                    "default": 0.0,
+                    "maximum": 0.3,
+                    "minimum": -0.3,
+                    "title": "Lateral M S",
+                    "type": "number"
+                },
+                "yaw_rad_s": {
+                    "default": 0.0,
+                    "maximum": 0.6,
+                    "minimum": -0.6,
+                    "title": "Yaw Rad S",
+                    "type": "number"
+                },
+                "duration_s": {
+                    "default": 0.5,
+                    "maximum": 2.0,
+                    "minimum": 0.1,
+                    "title": "Duration S",
+                    "type": "number"
+                }
+            },
+            "title": "MoveArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "start",
+        "description": "Switch the G1 controller to FSM 500.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "damp",
+        "description": "Switch the G1 controller to damping mode.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "zero_torque",
+        "description": "Disable commanded joint torque through FSM 0.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "PostureArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "wave_with_turn",
+        "description": "Use the legacy G1 wave action while turning the body.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "EmptyControlArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "continuous_gait",
+        "description": "Enable or disable the SDK continuous gait balance mode.",
+        "argument_defaults": {
+            "enabled": "<required>"
+        },
+        "required_arguments": ["enabled"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "title": "Enabled",
+                    "type": "boolean"
+                }
+            },
+            "required": ["enabled"],
+            "title": "ToggleControlArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "switch_move_mode",
+        "description": "Switch the SDK Move call between timed and continuous mode.",
+        "argument_defaults": {
+            "enabled": "<required>"
+        },
+        "required_arguments": ["enabled"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "title": "Enabled",
+                    "type": "boolean"
+                }
+            },
+            "required": ["enabled"],
+            "title": "ToggleControlArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "set_speed_mode",
+        "description": "Set the model-specific integer G1 speed mode.",
+        "argument_defaults": {
+            "mode": "<required>"
+        },
+        "required_arguments": ["mode"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "mode": {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "title": "Mode",
+                    "type": "integer"
+                }
+            },
+            "required": ["mode"],
+            "title": "SpeedModeArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "set_fsm_id",
+        "description": "Set an explicit G1 locomotion FSM ID.",
+        "argument_defaults": {
+            "fsm_id": "<required>"
+        },
+        "required_arguments": ["fsm_id"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "fsm_id": {
+                    "maximum": 999999,
+                    "minimum": 0,
+                    "title": "Fsm Id",
+                    "type": "integer"
+                }
+            },
+            "required": ["fsm_id"],
+            "title": "FsmIdArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "set_balance_mode",
+        "description": "Set the integer G1 balance mode.",
+        "argument_defaults": {
+            "balance_mode": "<required>"
+        },
+        "required_arguments": ["balance_mode"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "balance_mode": {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "title": "Balance Mode",
+                    "type": "integer"
+                }
+            },
+            "required": ["balance_mode"],
+            "title": "BalanceModeArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "set_swing_height",
+        "description": "Set the G1 swing height in SDK units.",
+        "argument_defaults": {
+            "swing_height": "<required>"
+        },
+        "required_arguments": ["swing_height"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "swing_height": {
+                    "title": "Swing Height",
+                    "type": "number"
+                }
+            },
+            "required": ["swing_height"],
+            "title": "SwingHeightArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "set_stand_height",
+        "description": "Set the G1 stand height in SDK units.",
+        "argument_defaults": {
+            "stand_height": "<required>"
+        },
+        "required_arguments": ["stand_height"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "stand_height": {
+                    "title": "Stand Height",
+                    "type": "number"
+                }
+            },
+            "required": ["stand_height"],
+            "title": "StandHeightArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "set_velocity",
+        "description": "Send one bounded SDK velocity command with a finite duration.",
+        "argument_defaults": {
+            "vx": "<required>",
+            "vy": "<required>",
+            "omega": "<required>",
+            "duration": 1.0
+        },
+        "required_arguments": ["omega", "vx", "vy"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "vx": {
+                    "maximum": 1.0,
+                    "minimum": -1.0,
+                    "title": "Vx",
+                    "type": "number"
+                },
+                "vy": {
+                    "maximum": 1.0,
+                    "minimum": -1.0,
+                    "title": "Vy",
+                    "type": "number"
+                },
+                "omega": {
+                    "maximum": 2.0,
+                    "minimum": -2.0,
+                    "title": "Omega",
+                    "type": "number"
+                },
+                "duration": {
+                    "default": 1.0,
+                    "maximum": 10.0,
+                    "minimum": 0.1,
+                    "title": "Duration",
+                    "type": "number"
+                }
+            },
+            "required": ["vx", "vy", "omega"],
+            "title": "SetVelocityArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "move_sdk",
+        "description": "Call the SDK's overloaded LocoClient.move API directly.",
+        "argument_defaults": {
+            "vx": "<required>",
+            "vy": "<required>",
+            "vyaw": "<required>",
+            "continuous_move": false
+        },
+        "required_arguments": ["vx", "vy", "vyaw"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "description": "Arguments for the SDK's overloaded ``LocoClient.move`` call.",
+            "properties": {
+                "vx": {
+                    "maximum": 1.0,
+                    "minimum": -1.0,
+                    "title": "Vx",
+                    "type": "number"
+                },
+                "vy": {
+                    "maximum": 1.0,
+                    "minimum": -1.0,
+                    "title": "Vy",
+                    "type": "number"
+                },
+                "vyaw": {
+                    "maximum": 2.0,
+                    "minimum": -2.0,
+                    "title": "Vyaw",
+                    "type": "number"
+                },
+                "continuous_move": {
+                    "default": false,
+                    "title": "Continuous Move",
+                    "type": "boolean"
+                }
+            },
+            "required": ["vx", "vy", "vyaw"],
+            "title": "SdkMoveArgs",
+            "type": "object"
+        },
+        "interruptible": true
+    },
+    {
+        "name": "set_task_id",
+        "description": "Set an explicit G1 arm-task ID through LocoClient.",
+        "argument_defaults": {
+            "task_id": "<required>"
+        },
+        "required_arguments": ["task_id"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "task_id": {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "title": "Task Id",
+                    "type": "integer"
+                }
+            },
+            "required": ["task_id"],
+            "title": "TaskIdArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "switch_to_user_ctrl",
+        "description": "Switch G1 control to the user controller.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "EmptyControlArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "switch_to_internal_ctrl",
+        "description": "Switch G1 control to an SDK internal FSM mode.",
+        "argument_defaults": {
+            "mode": "<required>"
+        },
+        "required_arguments": ["mode"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "mode": {
+                    "enum": ["last", "passive", "walkrun"],
+                    "title": "Mode",
+                    "type": "string"
+                }
+            },
+            "required": ["mode"],
+            "title": "InternalControlArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "fsm_api",
+        "description": "Send a raw JSON parameter to the G1 locomotion FSM API.",
+        "argument_defaults": {
+            "parameter": "<required>"
+        },
+        "required_arguments": ["parameter"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "parameter": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "title": "Parameter",
+                    "type": "string"
+                }
+            },
+            "required": ["parameter"],
+            "title": "FsmApiArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "execute_custom_arm_action",
+        "description": "Execute a named G1 teach/custom arm action.",
+        "argument_defaults": {
+            "action_name": "<required>"
+        },
+        "required_arguments": ["action_name"],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "action_name": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "title": "Action Name",
+                    "type": "string"
+                }
+            },
+            "required": ["action_name"],
+            "title": "CustomArmActionArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    },
+    {
+        "name": "stop_custom_arm_action",
+        "description": "Stop the currently running named G1 teach/custom arm action.",
+        "argument_defaults": {},
+        "required_arguments": [],
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "title": "EmptyControlArgs",
+            "type": "object"
+        },
+        "interruptible": false
+    }
+]

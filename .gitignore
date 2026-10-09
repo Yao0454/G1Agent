@@ -18,3 +18,45 @@ typings/
 .codex/
 .agents/
 debug/vision/
+
+# Python test, analysis and packaging caches
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Local environments and credentials
+.venv*/
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# OS/editor temporary files
+.DS_Store
+._*
+.idea/
+*.swp
+*.swo
+*~
+
+# Downloaded datasets, captured frames, evaluation outputs and checkpoints
+/evaluations/
+/training-runs/
+/models/
+/checkpoints/
+/outputs/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.gguf
+
+# Runtime logs and local scratch files
+*.log
+/temp.py

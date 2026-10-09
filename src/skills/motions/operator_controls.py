@@ -1,4 +1,4 @@
-"""Operator-only G1 LocoClient controls excluded from autonomous policies."""
+"""G1 LocoClient controls available through the shared skill catalog."""
 
 from typing import Literal
 
@@ -19,7 +19,7 @@ class ToggleControlArgs(SkillArgs):
 
 class SpeedModeArgs(SkillArgs):
     # The installed SDK declares an int without documenting the controller's
-    # model-specific enum. Keep it bounded and operator-only.
+    # model-specific enum. Keep it bounded.
     mode: int = Field(ge=0, le=255)
 
 
@@ -87,7 +87,7 @@ class WaveWithTurnSkill(_OperatorControlSkill[EmptyControlArgs]):
     metadata = SkillMetadata(
         name="wave_with_turn",
         description="Use the legacy G1 wave action while turning the body.",
-        tags=("gesture", "sdk_loco", "operator_only"),
+        tags=("gesture", "sdk_loco"),
         required_resources=("mobile_base", "upper_body"),
         timeout_s=12.0,
     )
@@ -106,7 +106,7 @@ class ContinuousGaitSkill(_OperatorControlSkill[ToggleControlArgs]):
     metadata = SkillMetadata(
         name="continuous_gait",
         description="Enable or disable the SDK continuous gait balance mode.",
-        tags=("configuration", "sdk_loco", "operator_only"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
     )
@@ -131,7 +131,7 @@ class SwitchMoveModeSkill(_OperatorControlSkill[ToggleControlArgs]):
     metadata = SkillMetadata(
         name="switch_move_mode",
         description="Switch the SDK Move call between timed and continuous mode.",
-        tags=("configuration", "sdk_loco", "operator_only"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
     )
@@ -156,7 +156,7 @@ class SetSpeedModeSkill(_OperatorControlSkill[SpeedModeArgs]):
     metadata = SkillMetadata(
         name="set_speed_mode",
         description="Set the model-specific integer G1 speed mode.",
-        tags=("configuration", "sdk_loco", "operator_only"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
     )
@@ -178,7 +178,7 @@ class SetFsmIdSkill(_OperatorControlSkill[FsmIdArgs]):
     metadata = SkillMetadata(
         name="set_fsm_id",
         description="Set an explicit G1 locomotion FSM ID.",
-        tags=("configuration", "sdk_loco", "operator_only", "dangerous"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
         interruptible=False,
@@ -194,7 +194,7 @@ class SetBalanceModeSkill(_OperatorControlSkill[BalanceModeArgs]):
     metadata = SkillMetadata(
         name="set_balance_mode",
         description="Set the integer G1 balance mode.",
-        tags=("configuration", "sdk_loco", "operator_only"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
     )
@@ -215,7 +215,7 @@ class SetSwingHeightSkill(_OperatorControlSkill[SwingHeightArgs]):
     metadata = SkillMetadata(
         name="set_swing_height",
         description="Set the G1 swing height in SDK units.",
-        tags=("configuration", "sdk_loco", "operator_only"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
     )
@@ -236,7 +236,7 @@ class SetStandHeightSkill(_OperatorControlSkill[StandHeightArgs]):
     metadata = SkillMetadata(
         name="set_stand_height",
         description="Set the G1 stand height in SDK units.",
-        tags=("configuration", "sdk_loco", "operator_only"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
     )
@@ -257,7 +257,7 @@ class SetVelocitySkill(_OperatorControlSkill[SetVelocityArgs]):
     metadata = SkillMetadata(
         name="set_velocity",
         description="Send one bounded SDK velocity command with a finite duration.",
-        tags=("motion", "sdk_loco", "operator_only"),
+        tags=("motion", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=15.0,
     )
@@ -286,7 +286,7 @@ class SdkMoveSkill(_OperatorControlSkill[SdkMoveArgs]):
     metadata = SkillMetadata(
         name="move_sdk",
         description="Call the SDK's overloaded LocoClient.move API directly.",
-        tags=("motion", "sdk_loco", "operator_only"),
+        tags=("motion", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=15.0,
     )
@@ -315,7 +315,7 @@ class SetTaskIdSkill(_OperatorControlSkill[TaskIdArgs]):
     metadata = SkillMetadata(
         name="set_task_id",
         description="Set an explicit G1 arm-task ID through LocoClient.",
-        tags=("configuration", "sdk_loco", "operator_only", "dangerous"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("upper_body",),
         timeout_s=12.0,
         interruptible=False,
@@ -331,7 +331,7 @@ class SwitchToUserControlSkill(_OperatorControlSkill[EmptyControlArgs]):
     metadata = SkillMetadata(
         name="switch_to_user_ctrl",
         description="Switch G1 control to the user controller.",
-        tags=("configuration", "sdk_loco", "operator_only", "dangerous"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
         interruptible=False,
@@ -351,7 +351,7 @@ class SwitchToInternalControlSkill(_OperatorControlSkill[InternalControlArgs]):
     metadata = SkillMetadata(
         name="switch_to_internal_ctrl",
         description="Switch G1 control to an SDK internal FSM mode.",
-        tags=("configuration", "sdk_loco", "operator_only", "dangerous"),
+        tags=("configuration", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=12.0,
         interruptible=False,
@@ -377,7 +377,7 @@ class FsmApiSkill(_OperatorControlSkill[FsmApiArgs]):
     metadata = SkillMetadata(
         name="fsm_api",
         description="Send a raw JSON parameter to the G1 locomotion FSM API.",
-        tags=("advanced", "sdk_loco", "operator_only", "dangerous"),
+        tags=("advanced", "sdk_loco"),
         required_resources=("mobile_base",),
         timeout_s=15.0,
         interruptible=False,
@@ -393,7 +393,7 @@ class ExecuteCustomArmActionSkill(_OperatorControlSkill[CustomArmActionArgs]):
     metadata = SkillMetadata(
         name="execute_custom_arm_action",
         description="Execute a named G1 teach/custom arm action.",
-        tags=("gesture", "sdk_arm", "operator_only", "dangerous"),
+        tags=("gesture", "sdk_arm"),
         required_resources=("upper_body",),
         timeout_s=30.0,
         interruptible=False,
@@ -416,7 +416,7 @@ class StopCustomArmActionSkill(_OperatorControlSkill[EmptyControlArgs]):
     metadata = SkillMetadata(
         name="stop_custom_arm_action",
         description="Stop the currently running named G1 teach/custom arm action.",
-        tags=("gesture", "safety", "sdk_arm", "operator_only"),
+        tags=("gesture", "safety", "sdk_arm"),
         required_resources=("upper_body",),
         timeout_s=12.0,
         interruptible=False,

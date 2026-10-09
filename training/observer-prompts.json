@@ -1,0 +1,4 @@
+[
+  "These images are a chronological video from your own head-mounted camera. Select what is happening:\nA. Someone waves hello to the camera wearer.\nB. Someone offers or performs a handshake with the camera wearer.\nC. People are greeting or shaking hands with each other, not the camera wearer.\nD. Someone is using a phone or computer, or there is no social interaction.\nE. Someone offers a high five to the camera wearer.\nAnswer with just one letter: A, B, C, D, or E.",
+  "Who is the intended recipient of the greeting gesture? Look at the person's gaze, body orientation and hand direction. Answer exactly one: CAMERA (greeting the camera wearer), OTHER (greeting another person or someone off to the side), NONE (no greeting)."
+]

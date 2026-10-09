@@ -33,7 +33,7 @@ class TaskInputPanel extends StatelessWidget {
               ),
               decoration: InputDecoration(
                 hintText: controller.cameraSource == 'local'
-                    ? '持续观察真实画面，回应握手、挥手或击掌。\n例如：有人向我挥手时，用中文回应。'
+                    ? '观察真实画面，根据任务调用机器人技能。\n例如：有人向我挥手时，用中文回应。'
                     : '输入文本任务（模拟视频不会发送给视觉模型）。',
                 fillColor: Colors.white,
               ),
@@ -49,7 +49,7 @@ class TaskInputPanel extends StatelessWidget {
               runSpacing: 6,
               children: [
                 if (controller.cameraSource == 'local')
-                  _suggestion('视觉交互', '持续观察手势，确认握手、挥手或击掌后回应，并简短说话。')
+                  _suggestion('视觉交互', '观察画面并回应人的交互，按需调用技能并简短说话。')
                 else ...[
                   _suggestion('观察环境', '观察前方环境，识别障碍物。'),
                   _suggestion('向前移动', '向前移动 1 米，遇到障碍物停止。'),
@@ -88,7 +88,7 @@ class TaskInputPanel extends StatelessWidget {
                     : controller.busy
                     ? '任务执行中，可按 Esc 停止'
                     : controller.cameraSource == 'local'
-                    ? '仅握手 / 挥手 / 击掌；持续运行至停止，不支持自由导航'
+                    ? '全部技能可调用；持续运行至停止'
                     : 'Ctrl / ⌘ + Enter 发送指令',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Color(0xFFA5AFBE), fontSize: 11),

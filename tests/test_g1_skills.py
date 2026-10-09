@@ -86,15 +86,17 @@ class G1SkillCatalogTests(unittest.TestCase):
             },
         )
         self.assertTrue(
-            all("operator_only" in skill.metadata.tags for skill in build_g1_operator_skills())
+            all(not {"operator_only", "dangerous"}.intersection(skill.metadata.tags)
+                for skill in build_g1_all_skills())
         )
 
-    def test_register_defaults_keep_dangerous_controls_out_of_registry(self) -> None:
+    def test_register_defaults_expose_complete_catalog(self) -> None:
         runtime = __import__("core.runtime", fromlist=["SkillRuntime"]).SkillRuntime(
             SimulatedRobotAdapter()
         )
         register_g1_skills(runtime)
-        self.assertFalse(runtime.registry.exists("zero_torque"))
+        self.assertTrue(runtime.registry.exists("zero_torque"))
+        self.assertEqual(len(runtime.registry.list()), len(build_g1_all_skills()))
         self.assertTrue(runtime.registry.exists("handshake"))
 
 
